@@ -77,4 +77,33 @@ class AmountsTest {
     void parseRejectsBelowMinimum() {
         assertNull(Amounts.parse(plugin, "0"));
     }
+
+    @Test
+    void parseAcceptsMagnitudeSuffixes() {
+        assertEquals(2_000.0, Amounts.parse(plugin, "2k"));
+        assertEquals(5_000_000.0, Amounts.parse(plugin, "5m"));
+        assertEquals(50_000_000_000.0, Amounts.parse(plugin, "50b"));
+        assertEquals(1_500_000_000.0, Amounts.parse(plugin, "1.5b"));
+        assertEquals(1_000_000_000_000.0, Amounts.parse(plugin, "1t"));
+    }
+
+    @Test
+    void parseSuffixesAreCaseInsensitive() {
+        assertEquals(5_000_000.0, Amounts.parse(plugin, "5M"));
+        assertEquals(3_000_000_000.0, Amounts.parse(plugin, "3B"));
+    }
+
+    @Test
+    void parseStillAcceptsPlainAmountsUnderAThousand() {
+        assertEquals(999_000.0, Amounts.parse(plugin, "999000"));
+        assertEquals(500.0, Amounts.parse(plugin, "500"));
+    }
+
+    @Test
+    void parseRejectsSuffixWithoutNumberBadSuffixAndOverMax() {
+        assertNull(Amounts.parse(plugin, "m"));            // suffix with no number
+        assertNull(Amounts.parse(plugin, "5x"));           // unknown suffix
+        assertNull(Amounts.parse(plugin, "5.m"));          // malformed mantissa
+        assertNull(Amounts.parse(plugin, "2t"));           // 2e12 > 1e12 max-transaction default
+    }
 }

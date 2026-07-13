@@ -324,7 +324,7 @@ public final class BankGui implements Listener {
 
         Double parsedAmount = com.mystipixel.royalbank.util.Amounts.parse(plugin, message);
         if (parsedAmount == null) {
-            msg(player, "custom-invalid-amount", "&cThat was not a safe valid amount. Use normal numbers only, or type cancel next time.");
+            msg(player, "custom-invalid-amount", "&cThat was not a valid amount. Use a number like &f5000&c or shorthand like &f5m&c (k/m/b/t), or type cancel next time.");
             openMain(player);
             return;
         }

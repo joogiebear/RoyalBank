@@ -44,13 +44,32 @@ public final class Amounts {
         }
 
         String normalized = raw.trim();
-        if (normalized.isEmpty() || normalized.contains(",") || !NORMAL_DECIMAL.matcher(normalized).matches()) {
+        if (normalized.isEmpty() || normalized.contains(",")) {
+            return null;
+        }
+
+        // Optional magnitude suffix so players can type shorthand for large sums:
+        // k = thousand, m = million, b = billion, t = trillion (case-insensitive).
+        // e.g. "5m" -> 5,000,000, "1.5b" -> 1,500,000,000. Amounts below 1,000 need no suffix.
+        double multiplier = 1.0;
+        char last = Character.toLowerCase(normalized.charAt(normalized.length() - 1));
+        if (last == 'k' || last == 'm' || last == 'b' || last == 't') {
+            multiplier = switch (last) {
+                case 'k' -> 1_000.0;
+                case 'm' -> 1_000_000.0;
+                case 'b' -> 1_000_000_000.0;
+                default -> 1_000_000_000_000.0; // 't'
+            };
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+
+        if (!NORMAL_DECIMAL.matcher(normalized).matches()) {
             return null;
         }
 
         double amount;
         try {
-            amount = Double.parseDouble(normalized);
+            amount = Double.parseDouble(normalized) * multiplier;
         } catch (NumberFormatException exception) {
             return null;
         }

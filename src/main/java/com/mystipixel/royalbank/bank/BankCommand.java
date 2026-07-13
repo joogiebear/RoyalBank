@@ -166,7 +166,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         }
         Double amount = Amounts.parse(plugin, args[2]);
         if (amount == null) {
-            send(player, "&cThat is not a safe valid number. Minimum: " + bankService.money(plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01)) + ".");
+            send(player, "&cThat is not a safe valid number. Minimum: " + bankService.money(plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01)) + ". &7Tip: use k/m/b/t, e.g. &f5m&7 = 5,000,000.");
             return;
         }
         sendResult(player, bankService.transfer(player, target, amount));
@@ -337,7 +337,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         }
         Double amount = Amounts.parse(plugin, args[1]);
         if (amount == null) {
-            send(player, "&cThat is not a safe valid number. Minimum: " + bankService.money(plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01)) + ".");
+            send(player, "&cThat is not a safe valid number. Minimum: " + bankService.money(plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01)) + ". &7Tip: use k/m/b/t, e.g. &f5m&7 = 5,000,000.");
         }
         return amount;
     }
@@ -409,13 +409,13 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             return filter(Collections.singletonList("clear"), args[2]);
         }
         if (args.length == 2 && (args[0].equalsIgnoreCase("deposit") || args[0].equalsIgnoreCase("withdraw"))) {
-            return filter(Arrays.asList("100", "1000", "10000"), args[1]);
+            return filter(Arrays.asList("1000", "100000", "1m", "10m", "100m"), args[1]);
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("transfer")) {
             return filter(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList(), args[1]);
         }
         if (args.length == 3 && args[0].equalsIgnoreCase("transfer")) {
-            return filter(Arrays.asList("100", "1000", "10000"), args[2]);
+            return filter(Arrays.asList("1000", "100000", "1m", "10m", "100m"), args[2]);
         }
         if (args.length == 4 && args[0].equalsIgnoreCase("admin") && args[1].equalsIgnoreCase("setlevel")) {
             return filter(levelManager.getOrderedLevelNumbers().stream().map(String::valueOf).toList(), args[3]);
