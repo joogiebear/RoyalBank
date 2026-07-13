@@ -25,6 +25,8 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 public final class BankCommand implements CommandExecutor, TabCompleter {
     private static final DateTimeFormatter BACKUP_TIME = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").withZone(ZoneId.systemDefault());
@@ -33,6 +35,12 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     private final BankService bankService;
     private final LevelManager levelManager;
     private final BankGui bankGui;
+
+    /** Large transfers awaiting a /bank transfer confirm, keyed by sender. Expired entries are ignored. */
+    private final Map<UUID, PendingTransfer> pendingTransfers = new ConcurrentHashMap<>();
+
+    private record PendingTransfer(UUID recipient, double amount, long createdAt) {
+    }
 
     public BankCommand(RoyalBankPlugin plugin, BankService bankService, LevelManager levelManager, BankGui bankGui) {
         this.plugin = plugin;
@@ -153,6 +161,17 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             msg(player, "permission.transfer", "&cYou do not have permission to transfer money.");
             return;
         }
+        // /bank transfer confirm | cancel — act on a pending large transfer.
+        if (args.length == 2 && args[1].equalsIgnoreCase("confirm")) {
+            confirmTransfer(player);
+            return;
+        }
+        if (args.length == 2 && args[1].equalsIgnoreCase("cancel")) {
+            send(player, pendingTransfers.remove(player.getUniqueId()) != null
+                    ? "&7Pending transfer cancelled."
+                    : "&7You have no transfer awaiting confirmation.");
+            return;
+        }
         if (args.length < 3) {
             send(player, "&cUsage: /bank transfer <player> <amount>");
             return;
@@ -169,7 +188,35 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             send(player, "&cThat is not a safe valid number. Minimum: " + bankService.money(plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01)) + ". &7Tip: use k/m/b/t, e.g. &f5m&7 = 5,000,000.");
             return;
         }
+
+        // Large transfers require confirmation so a fat-fingered amount (e.g. 5b instead of 5m) is caught.
+        double threshold = plugin.getConfig().getDouble("settings.transfer.confirm-threshold", 100_000_000.0);
+        if (threshold > 0 && amount >= threshold) {
+            pendingTransfers.put(player.getUniqueId(), new PendingTransfer(target.getUniqueId(), amount, System.currentTimeMillis()));
+            String targetName = target.getName() == null ? args[1] : target.getName();
+            send(player, "&eLarge transfer: &f" + bankService.money(amount) + " &eto &f" + targetName + "&e.");
+            send(player, "&7Type &f/bank transfer confirm &7within " + confirmTimeoutSeconds() + "s to send, or &f/bank transfer cancel&7.");
+            return;
+        }
         sendResult(player, bankService.transfer(player, target, amount));
+    }
+
+    private void confirmTransfer(Player player) {
+        PendingTransfer pending = pendingTransfers.remove(player.getUniqueId());
+        if (pending == null) {
+            send(player, "&cYou have no transfer awaiting confirmation.");
+            return;
+        }
+        if (System.currentTimeMillis() - pending.createdAt() > confirmTimeoutSeconds() * 1000L) {
+            send(player, "&cThat transfer expired. Please run it again.");
+            return;
+        }
+        // Re-run through the full transfer path so balance/cap are re-validated at confirm time.
+        sendResult(player, bankService.transfer(player, Bukkit.getOfflinePlayer(pending.recipient()), pending.amount()));
+    }
+
+    private long confirmTimeoutSeconds() {
+        return Math.max(5L, plugin.getConfig().getLong("settings.transfer.confirm-timeout-seconds", 30L));
     }
 
     private void handleUpgrade(Player player) {
@@ -412,7 +459,12 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             return filter(Arrays.asList("1000", "100000", "1m", "10m", "100m"), args[1]);
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("transfer")) {
-            return filter(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList(), args[1]);
+            List<String> options = new ArrayList<>(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList());
+            if (sender instanceof Player p && pendingTransfers.containsKey(p.getUniqueId())) {
+                options.add("confirm");
+                options.add("cancel");
+            }
+            return filter(options, args[1]);
         }
         if (args.length == 3 && args[0].equalsIgnoreCase("transfer")) {
             return filter(Arrays.asList("1000", "100000", "1m", "10m", "100m"), args[2]);

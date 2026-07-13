@@ -27,6 +27,12 @@ settings:
     min-transaction: 0.01
     max-transaction: 1000000000000.0
     decimal-places: 2
+  # Transfers at or above confirm-threshold require a second step (/bank transfer confirm),
+  # guarding against fat-fingered amounts like typing 5b instead of 5m. Set confirm-threshold
+  # to 0 to never require confirmation. The pending transfer expires after confirm-timeout-seconds.
+  transfer:
+    confirm-threshold: 100000000.0
+    confirm-timeout-seconds: 30
 
 transactions:
   max-per-player: 100
