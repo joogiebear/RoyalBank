@@ -12,7 +12,7 @@ softdepend:
 commands:
   bank:
     description: RoyalBank player banking command.
-    usage: /bank [balance|deposit|withdraw|upgrade|interest|reload|admin]
+    usage: /bank [balance|deposit|withdraw|transfer|upgrade|interest|reload|admin]
     aliases: [royalbank, rb]
 permissions:
   royalbank.use:
@@ -20,6 +20,9 @@ permissions:
   royalbank.deposit:
     default: true
   royalbank.withdraw:
+    default: true
+  royalbank.transfer:
+    description: Transfer bank money to another player.
     default: true
   royalbank.upgrade:
     default: true

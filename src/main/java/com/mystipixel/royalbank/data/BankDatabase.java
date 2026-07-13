@@ -206,6 +206,42 @@ public final class BankDatabase {
         }
     }
 
+    /**
+     * Atomically moves money between two accounts: persists both balances AND both audit transactions
+     * in a single SQLite transaction, so a transfer can never debit one side without crediting the other.
+     * Returns false (with rollback) on failure so the caller can report that no money moved.
+     */
+    public boolean saveTransfer(BankAccount sender, BankAccount recipient, double amount,
+                                String senderType, String senderNote,
+                                String recipientType, String recipientNote) {
+        boolean previousAutoCommit = true;
+        try {
+            previousAutoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(false);
+            try (PreparedStatement accountStatement = connection.prepareStatement(SAVE_ACCOUNT_SQL)) {
+                bindAccount(accountStatement, sender);
+                accountStatement.executeUpdate();
+                bindAccount(accountStatement, recipient);
+                accountStatement.executeUpdate();
+            }
+            try (PreparedStatement transactionStatement = connection.prepareStatement(INSERT_TRANSACTION_SQL)) {
+                bindTransaction(transactionStatement, sender.uuid(), senderType, amount, sender.balance(), senderNote);
+                transactionStatement.executeUpdate();
+                bindTransaction(transactionStatement, recipient.uuid(), recipientType, amount, recipient.balance(), recipientNote);
+                transactionStatement.executeUpdate();
+            }
+            connection.commit();
+            return true;
+        } catch (SQLException exception) {
+            plugin.getLogger().severe("Could not save bank transfer " + sender.uuid() + " -> " + recipient.uuid()
+                    + ": " + exception.getMessage());
+            rollbackQuietly();
+            return false;
+        } finally {
+            restoreAutoCommit(previousAutoCommit);
+        }
+    }
+
     public boolean addTransaction(UUID uuid, String type, double amount, double balanceAfter, String note) {
         try (PreparedStatement statement = connection.prepareStatement(INSERT_TRANSACTION_SQL)) {
             bindTransaction(statement, uuid, type, amount, balanceAfter, note);

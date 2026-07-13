@@ -209,11 +209,11 @@ public final class BankService implements Listener {
         cacheIfOnline(updated);
         // Report the principal deposit (incoming=true so parking detection sees it) and any bonus as
         // separate audit events, so the ledger's balance-after stays internally consistent.
-        auditSink.record(player.getUniqueId(), player.getName(), "deposited", charge, account.balance(), principalBalance, true);
+        auditSink.record(player.getUniqueId(), player.getName(), "deposited", charge, account.balance(), principalBalance, true, null, null);
 
         if (paidBonus > 0.0) {
             database.addTransaction(player.getUniqueId(), "BONUS", paidBonus, newBalance, "First deposit bonus");
-            auditSink.record(player.getUniqueId(), player.getName(), "bonus", paidBonus, principalBalance, newBalance, true);
+            auditSink.record(player.getUniqueId(), player.getName(), "bonus", paidBonus, principalBalance, newBalance, true, null, null);
             return OperationResult.success("&aDeposited " + money(charge) + " &aand received a first deposit bonus of &e" + money(paidBonus) + "&a!");
         }
         return OperationResult.success("&aDeposited " + money(charge) + " &ainto your bank.");
@@ -247,8 +247,63 @@ public final class BankService implements Listener {
         }
         cacheIfOnline(updated);
         // Withdrawals shrink the bank balance (incoming=false): audit + large-transaction alert only.
-        auditSink.record(player.getUniqueId(), player.getName(), "withdrew", amount, account.balance(), newBalance, false);
+        auditSink.record(player.getUniqueId(), player.getName(), "withdrew", amount, account.balance(), newBalance, false, null, null);
         return OperationResult.success("&aWithdrew " + money(amount) + " &afrom your bank.");
+    }
+
+    /**
+     * Moves money bank-to-bank from an online sender to another player (online or offline). No Vault
+     * involvement: the total in the bank system is conserved. Emits two audit events carrying the
+     * counterparty on each end, so EconGuard can link the two players for RMT / collusion detection.
+     * If the full amount will not fit under the recipient's level cap, the whole transfer is rejected.
+     */
+    public OperationResult transfer(Player sender, OfflinePlayer recipient, double amount) {
+        if (recipient.getUniqueId().equals(sender.getUniqueId())) {
+            return OperationResult.fail("&cYou cannot transfer money to yourself.");
+        }
+        amount = Amounts.sanitize(plugin, amount);
+        double minimum = plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01);
+        if (amount < minimum) {
+            return OperationResult.fail("&cAmount must be at least " + money(minimum) + ".");
+        }
+
+        BankAccount senderAccount = getAccount(sender);
+        if (senderAccount.balance() < amount) {
+            return OperationResult.fail("&cYour bank does not have that much money to transfer.");
+        }
+
+        BankAccount recipientAccount = database.getOrCreateAccount(recipient, levelManager.getStartingLevel());
+        BankLevel recipientLevel = getEffectiveLevel(recipientAccount.level());
+        double recipientSpace = round(recipientLevel.maxBalance() - recipientAccount.balance());
+        if (amount > recipientSpace) {
+            return OperationResult.fail("&c" + recipientAccount.username() + "'s bank cannot hold that much - they only have "
+                    + money(Math.max(0.0, recipientSpace)) + " of space.");
+        }
+
+        double senderNew = round(senderAccount.balance() - amount);
+        double recipientNew = round(recipientAccount.balance() + amount);
+        BankAccount senderUpdated = senderAccount.withBalance(senderNew);
+        BankAccount recipientUpdated = recipientAccount.withBalance(recipientNew);
+
+        String senderName = sender.getName();
+        String recipientName = recipientAccount.username();
+        if (!database.saveTransfer(senderUpdated, recipientUpdated, amount,
+                "TRANSFER_OUT", "Transfer to " + recipientName,
+                "TRANSFER_IN", "Transfer from " + senderName)) {
+            return OperationResult.fail("&cThe transfer could not be saved; no money was moved. Please try again.");
+        }
+        cacheIfOnline(senderUpdated);
+        cacheIfOnline(recipientUpdated);
+
+        // Report both ends with the counterparty set. The recipient's incoming event is what drives
+        // EconGuard's young-incoming / collusion signals; the sender's is audited too (and flagged as
+        // the other end of any collusion ring).
+        auditSink.record(sender.getUniqueId(), senderName, "transfer-sent", amount,
+                senderAccount.balance(), senderNew, false, recipient.getUniqueId(), recipientName);
+        auditSink.record(recipient.getUniqueId(), recipientName, "transfer-received", amount,
+                recipientAccount.balance(), recipientNew, true, sender.getUniqueId(), senderName);
+
+        return OperationResult.success("&aTransferred " + money(amount) + " &ato " + recipientName + "&a's bank.");
     }
 
     public OperationResult upgrade(Player player) {
@@ -328,7 +383,7 @@ public final class BankService implements Listener {
             cacheIfOnline(updated);
             // Interest grows the bank balance (incoming=true): compounding on a parked balance is part
             // of the same parking signal, and it keeps the audit ledger complete.
-            auditSink.record(player.getUniqueId(), player.getName(), "interest", actuallyPaid, account.balance(), newBalance, true);
+            auditSink.record(player.getUniqueId(), player.getName(), "interest", actuallyPaid, account.balance(), newBalance, true, null, null);
             return OperationResult.success("&aDaily interest paid to your bank: &e" + money(actuallyPaid));
         }
 
@@ -346,7 +401,7 @@ public final class BankService implements Listener {
         }
         cacheIfOnline(updated);
         // Interest paid to the purse leaves the bank (incoming=false): audit + large-alert only.
-        auditSink.record(player.getUniqueId(), player.getName(), "interest-to-purse", interest, account.balance(), account.balance(), false);
+        auditSink.record(player.getUniqueId(), player.getName(), "interest-to-purse", interest, account.balance(), account.balance(), false, null, null);
         return OperationResult.success("&aDaily interest paid to your wallet: &e" + money(interest));
     }
 

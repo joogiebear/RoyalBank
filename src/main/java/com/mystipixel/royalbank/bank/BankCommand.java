@@ -74,10 +74,11 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         switch (args[0].toLowerCase()) {
             case "deposit" -> handleDeposit(player, args);
             case "withdraw" -> handleWithdraw(player, args);
+            case "transfer" -> handleTransfer(player, args);
             case "upgrade" -> handleUpgrade(player);
             case "interest" -> handleInterest(player);
             case "info" -> sendMultiline(player, bankService.describeNextUpgrade(player));
-            default -> msg(player, "unknown-command", "&cUnknown subcommand. Use /bank, /bank deposit, /bank withdraw, /bank upgrade, /bank interest, /bank info, or /bank admin.");
+            default -> msg(player, "unknown-command", "&cUnknown subcommand. Use /bank, /bank deposit, /bank withdraw, /bank transfer, /bank upgrade, /bank interest, /bank info, or /bank admin.");
         }
         return true;
     }
@@ -145,6 +146,30 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
 
     private void handleInterest(Player player) {
         sendResult(player, bankService.claimInterest(player, true));
+    }
+
+    private void handleTransfer(Player player, String[] args) {
+        if (!player.hasPermission("royalbank.transfer")) {
+            msg(player, "permission.transfer", "&cYou do not have permission to transfer money.");
+            return;
+        }
+        if (args.length < 3) {
+            send(player, "&cUsage: /bank transfer <player> <amount>");
+            return;
+        }
+        OfflinePlayer target = Bukkit.getOfflinePlayer(args[1]);
+        // Reject names that have never joined, so a typo cannot silently create a junk "ghost" account.
+        if (!target.hasPlayedBefore() && !target.isOnline()) {
+            msg(player, "admin.unknown-player", "&cNo bank account exists for '{player}'. They must join the server first.",
+                    Map.of("player", args[1]));
+            return;
+        }
+        Double amount = Amounts.parse(plugin, args[2]);
+        if (amount == null) {
+            send(player, "&cThat is not a safe valid number. Minimum: " + bankService.money(plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01)) + ".");
+            return;
+        }
+        sendResult(player, bankService.transfer(player, target, amount));
     }
 
     private void handleUpgrade(Player player) {
@@ -370,7 +395,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) {
-            List<String> options = new ArrayList<>(Arrays.asList("balance", "deposit", "withdraw", "upgrade", "interest", "info"));
+            List<String> options = new ArrayList<>(Arrays.asList("balance", "deposit", "withdraw", "transfer", "upgrade", "interest", "info"));
             if (sender.hasPermission("royalbank.admin")) {
                 options.add("reload");
                 options.add("admin");
@@ -385,6 +410,12 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         }
         if (args.length == 2 && (args[0].equalsIgnoreCase("deposit") || args[0].equalsIgnoreCase("withdraw"))) {
             return filter(Arrays.asList("100", "1000", "10000"), args[1]);
+        }
+        if (args.length == 2 && args[0].equalsIgnoreCase("transfer")) {
+            return filter(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList(), args[1]);
+        }
+        if (args.length == 3 && args[0].equalsIgnoreCase("transfer")) {
+            return filter(Arrays.asList("100", "1000", "10000"), args[2]);
         }
         if (args.length == 4 && args[0].equalsIgnoreCase("admin") && args[1].equalsIgnoreCase("setlevel")) {
             return filter(levelManager.getOrderedLevelNumbers().stream().map(String::valueOf).toList(), args[3]);
