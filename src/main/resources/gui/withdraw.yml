@@ -1,0 +1,95 @@
+title: "&c&lWithdraw Coins"
+rows: 4
+sounds:
+  open:
+    enabled: true
+    name: "UI_BUTTON_CLICK"
+    volume: 0.7
+    pitch: 1.2
+  success:
+    enabled: true
+    name: "ENTITY_EXPERIENCE_ORB_PICKUP"
+    volume: 0.8
+    pitch: 1.4
+  fail:
+    enabled: true
+    name: "ENTITY_VILLAGER_NO"
+    volume: 0.7
+    pitch: 1.0
+  prompt:
+    enabled: true
+    name: "BLOCK_NOTE_BLOCK_PLING"
+    volume: 0.7
+    pitch: 1.5
+filler:
+  enabled: true
+  material: "GRAY_STAINED_GLASS_PANE"
+  name: "&8"
+  lore: []
+items:
+  all:
+    slot: 11
+    material: "DISPENSER"
+    name: "&cWithdraw Everything"
+    lore:
+      - "&7Withdraw your entire bank balance."
+      - ""
+      - "&7Bank: &6{balance}"
+      - ""
+      - "&eClick to withdraw all!"
+    action: "WITHDRAW_ALL"
+  half:
+    slot: 13
+    material: "RED_CANDLE"
+    name: "&cWithdraw Half"
+    lore:
+      - "&7Withdraw half of your account."
+      - ""
+      - "&7Half Account: &6{half_balance}"
+      - ""
+      - "&eClick to withdraw half!"
+    action: "WITHDRAW_HALF"
+  twenty:
+    slot: 15
+    material: "GOLD_NUGGET"
+    name: "&cWithdraw 20%"
+    lore:
+      - "&7Withdraw 20% of your account."
+      - ""
+      - "&720% Account: &6{twenty_balance}"
+      - ""
+      - "&eClick to withdraw 20%!"
+    action: "WITHDRAW_TWENTY"
+  custom:
+    slot: 17
+    material: "SPRUCE_SIGN"
+    name: "&cWithdraw Custom Amount"
+    lore:
+      - "&7Enter a custom amount in chat."
+      - ""
+      - "&eClick to type an amount!"
+    action: "WITHDRAW_CUSTOM"
+  back:
+    slot: 31
+    material: "ARROW"
+    name: "&aBack"
+    lore:
+      - "&7Return to the bank menu."
+    action: "BACK_MAIN"
+  custom-bottom:
+    slot: 32 # row 4, column 5
+    material: "SPRUCE_SIGN"
+    name: "&eCustom Amount"
+    lore:
+      - "&7Also available here if you"
+      - "&7prefer the bottom-center button."
+      - ""
+      - "&eClick to type an amount!"
+    action: "WITHDRAW_CUSTOM"
+  close:
+    slot: 36
+    material: "BARRIER"
+    name: "&cClose"
+    lore:
+      - "&7Close this menu."
+    action: "CLOSE"

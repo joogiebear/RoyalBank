@@ -1,0 +1,61 @@
+title: "&d&lBank Transactions"
+rows: 4
+sounds:
+  open:
+    enabled: true
+    name: "UI_BUTTON_CLICK"
+    volume: 0.7
+    pitch: 1.2
+  success:
+    enabled: true
+    name: "ENTITY_EXPERIENCE_ORB_PICKUP"
+    volume: 0.8
+    pitch: 1.4
+  fail:
+    enabled: true
+    name: "ENTITY_VILLAGER_NO"
+    volume: 0.7
+    pitch: 1.0
+  prompt:
+    enabled: true
+    name: "BLOCK_NOTE_BLOCK_PLING"
+    volume: 0.7
+    pitch: 1.5
+filler:
+  enabled: true
+  material: "GRAY_STAINED_GLASS_PANE"
+  name: "&8"
+  lore: []
+transaction-slots:
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  - 15
+  - 16
+  - 20
+  - 21
+  - 22
+empty-item:
+  slot: 14
+  material: "PAPER"
+  name: "&eNo Transactions Yet"
+  lore:
+    - "&7Deposits, withdrawals, interest,"
+    - "&7bonuses, and upgrades will appear here."
+items:
+  back:
+    slot: 32
+    material: "ARROW"
+    name: "&aBack"
+    lore:
+      - "&7Return to the bank menu."
+    action: "BACK_MAIN"
+  close:
+    slot: 36
+    material: "BARRIER"
+    name: "&cClose"
+    lore:
+      - "&7Close this menu."
+    action: "CLOSE"

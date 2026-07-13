@@ -1,0 +1,30 @@
+name: RoyalBank
+version: ${version}
+main: com.mystipixel.royalbank.RoyalBankPlugin
+api-version: '1.21'
+author: Mystipixel
+depend:
+  - Vault
+softdepend:
+  - EcoItems
+  - PlaceholderAPI
+  - EconGuard
+commands:
+  bank:
+    description: RoyalBank player banking command.
+    usage: /bank [balance|deposit|withdraw|upgrade|interest|reload|admin]
+    aliases: [royalbank, rb]
+permissions:
+  royalbank.use:
+    default: true
+  royalbank.deposit:
+    default: true
+  royalbank.withdraw:
+    default: true
+  royalbank.upgrade:
+    default: true
+  royalbank.admin:
+    default: op
+  royalbank.alerts:
+    description: Receives anti-abuse alerts and flag notifications in chat.
+    default: op

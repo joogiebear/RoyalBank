@@ -1,0 +1,46 @@
+title: "&6&lConfirm Upgrade"
+rows: 3
+sounds:
+  open:
+    enabled: true
+    name: "UI_BUTTON_CLICK"
+    volume: 0.7
+    pitch: 1.2
+  success:
+    enabled: true
+    name: "ENTITY_EXPERIENCE_ORB_PICKUP"
+    volume: 0.8
+    pitch: 1.4
+  fail:
+    enabled: true
+    name: "ENTITY_VILLAGER_NO"
+    volume: 0.7
+    pitch: 1.0
+  prompt:
+    enabled: true
+    name: "BLOCK_NOTE_BLOCK_PLING"
+    volume: 0.7
+    pitch: 1.5
+filler:
+  enabled: true
+  material: "GRAY_STAINED_GLASS_PANE"
+  name: "&8"
+  lore: []
+items:
+  confirm:
+    slot: 12
+    material: "LIME_CONCRETE"
+    name: "&aConfirm Upgrade"
+    lore:
+      - "{upgrade_info}"
+      - ""
+      - "&cThis will remove the listed coins/items."
+      - "&eClick to confirm."
+    action: "CONFIRM_UPGRADE"
+  cancel:
+    slot: 16
+    material: "RED_CONCRETE"
+    name: "&cCancel"
+    lore:
+      - "&7Return to the bank menu."
+    action: "BACK_MAIN"

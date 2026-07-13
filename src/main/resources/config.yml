@@ -1,0 +1,256 @@
+settings:
+  bstats-plugin-id: 31375
+  currency-symbol: "$"
+  starting-level: 1
+  interest-on-join: true
+  interest-command-enabled: true
+  # Interest payout cooldown in real hours. Default: 31 hours.
+  interest-cooldown-hours: 31
+  pay-interest-to-bank: true
+  upgrade-unlock-combined-balance: 10000000.0
+  # First-deposit bonus is paid once per account (tracked persistently), the first time a player
+  # deposits. It is no longer re-granted by emptying and re-depositing.
+  first-deposit-bonus:
+    enabled: true
+    amount: 10.0
+  # Per-claim interest ceiling. Interest frequency is governed by interest-cooldown-hours,
+  # so the effective payout per cooldown period is capped at this amount.
+  # Set amount to a negative number for no global cap.
+  max-daily-interest:
+    enabled: true
+    amount: 1500000.0
+  # How long a GUI "custom amount" chat prompt stays active. After this, a normal chat
+  # message is no longer captured as a deposit/withdraw amount.
+  custom-amount-timeout-seconds: 60
+  messages-prefix: "&6&lRoyalBank &8» &r"
+  amount-limits:
+    min-transaction: 0.01
+    max-transaction: 1000000000000.0
+    decimal-places: 2
+
+transactions:
+  max-per-player: 100
+  prune-on-startup: true
+
+database:
+  file: "bank.db"
+
+# Anti-abuse / RMT detection. RoyalBank watches money entering and leaving the bank; it cannot see
+# purse-to-purse transfers (handle those in your economy plugin), but large deposits and rapid balance
+# growth are strong signals of laundering or coins being sold for real money. Alerts go to the console,
+# to online staff with the royalbank.alerts permission, and (optionally) to a Discord webhook.
+anti-abuse:
+  # Warn when a single deposit/withdraw is very large, or when a balance first crosses a ceiling.
+  large-transaction-alerts:
+    enabled: true
+    transaction-threshold: 100000000.0   # alert on any single deposit/withdraw >= this (0 = off)
+    balance-threshold: 500000000.0       # alert when a bank balance first crosses this (0 = off)
+  # Flag accounts whose bank balance grows abnormally fast (money being parked).
+  velocity-flagging:
+    enabled: true
+    window-minutes: 10
+    growth-threshold: 1000000000.0       # gaining >= this within the window flags the account (0 = off)
+  # Message online players who have the royalbank.alerts permission when alerts/flags fire.
+  notify-staff: true
+  # Optional Discord webhook URL for alerts and flags. Leave blank to disable.
+  discord-webhook: ""
+
+# RoyalBank account progression.
+# Interest is calculated in tranches/brackets, then capped by max-interest.
+# Notes:
+# - max-interest: per-level interest cap. Use 0 to disable interest for a tier, or a negative
+#   number for no per-level cap.
+# - daily-interest-percent: only used as a flat fallback when a level has NO interest-tranches
+#   block. When interest-tranches are defined (as below), this value is ignored.
+# - For best results, make the top tranche's "to" reach the level's max-balance so high balances
+#   keep earning up to the interest cap.
+levels:
+  1:
+    name: "Starter Account"
+    max-balance: 50000000.0
+    daily-interest-percent: 2.0
+    max-interest: 250000.0
+    interest-tranches:
+      1:
+        from: 0.0
+        to: 10000000.0
+        percent: 2.0
+      2:
+        from: 10000000.0
+        to: 15000000.0
+        percent: 1.0
+    upgrade-cost:
+      money: 0.0
+      items: []
+  2:
+    name: "Gold Account"
+    max-balance: 100000000.0
+    daily-interest-percent: 2.0
+    max-interest: 300000.0
+    interest-tranches:
+      1:
+        from: 0.0
+        to: 10000000.0
+        percent: 2.0
+      2:
+        from: 10000000.0
+        to: 20000000.0
+        percent: 1.0
+    upgrade-cost:
+      money: 5000000.0
+      items:
+        # Supported shorthand format: <namespace>:<id>:<amount>
+        # Vanilla example: minecraft:GOLD_BLOCK:64
+        # EcoItems example: ecoitems:enchanted_gold_block:64
+        - "minecraft:GOLD_BLOCK:64"
+  3:
+    name: "Deluxe Account"
+    max-balance: 250000000.0
+    daily-interest-percent: 2.0
+    max-interest: 350000.0
+    interest-tranches:
+      1:
+        from: 0.0
+        to: 10000000.0
+        percent: 2.0
+      2:
+        from: 10000000.0
+        to: 20000000.0
+        percent: 1.0
+      3:
+        from: 20000000.0
+        to: 30000000.0
+        percent: 0.5
+    upgrade-cost:
+      money: 10000000.0
+      items:
+        - "minecraft:GOLD_BLOCK:320"
+  4:
+    name: "Super Deluxe Account"
+    max-balance: 500000000.0
+    daily-interest-percent: 2.0
+    max-interest: 390000.0
+    interest-tranches:
+      1:
+        from: 0.0
+        to: 10000000.0
+        percent: 2.0
+      2:
+        from: 10000000.0
+        to: 20000000.0
+        percent: 1.0
+      3:
+        from: 20000000.0
+        to: 30000000.0
+        percent: 0.5
+      4:
+        from: 30000000.0
+        to: 50000000.0
+        percent: 0.2
+    upgrade-cost:
+      money: 25000000.0
+      items:
+        - "minecraft:GOLD_BLOCK:1280"
+  5:
+    name: "Premier Account"
+    max-balance: 1000000000.0
+    daily-interest-percent: 2.0
+    max-interest: 500000.0
+    interest-tranches:
+      1:
+        from: 0.0
+        to: 10000000.0
+        percent: 2.0
+      2:
+        from: 10000000.0
+        to: 20000000.0
+        percent: 1.0
+      3:
+        from: 20000000.0
+        to: 30000000.0
+        percent: 0.5
+      4:
+        from: 30000000.0
+        to: 50000000.0
+        percent: 0.2
+      5:
+        from: 50000000.0
+        to: 160000000.0
+        percent: 0.1
+    upgrade-cost:
+      money: 50000000.0
+      items:
+        - "ecoitems:enchanted_gold_block:50"
+  6:
+    name: "Luxurious Account"
+    max-balance: 6000000000.0
+    daily-interest-percent: 2.0
+    max-interest: 1000000.0
+    interest-tranches:
+      1:
+        from: 0.0
+        to: 10000000.0
+        percent: 2.0
+      2:
+        from: 10000000.0
+        to: 20000000.0
+        percent: 1.0
+      3:
+        from: 20000000.0
+        to: 30000000.0
+        percent: 0.5
+      4:
+        from: 30000000.0
+        to: 50000000.0
+        percent: 0.2
+      5:
+        from: 50000000.0
+        to: 160000000.0
+        percent: 0.1
+      6:
+        from: 160000000.0
+        to: 5100000000.0
+        percent: 0.01
+    upgrade-cost:
+      money: 100000000.0
+      items:
+        - "ecoitems:enchanted_gold_block:100"
+  7:
+    name: "Palatial Account"
+    max-balance: 60000000000.0
+    daily-interest-percent: 2.0
+    max-interest: 1500000.0
+    interest-tranches:
+      1:
+        from: 0.0
+        to: 10000000.0
+        percent: 2.0
+      2:
+        from: 10000000.0
+        to: 20000000.0
+        percent: 1.0
+      3:
+        from: 20000000.0
+        to: 30000000.0
+        percent: 0.5
+      4:
+        from: 30000000.0
+        to: 50000000.0
+        percent: 0.2
+      5:
+        from: 50000000.0
+        to: 160000000.0
+        percent: 0.1
+      6:
+        from: 160000000.0
+        to: 5100000000.0
+        percent: 0.01
+      7:
+        from: 5100000000.0
+        to: 55000000000.0
+        percent: 0.001
+    upgrade-cost:
+      money: 200000000.0
+      items:
+        - "ecoitems:enchanted_gold_block:200"
+        - "ecoitems:palatial_bank_core:1"

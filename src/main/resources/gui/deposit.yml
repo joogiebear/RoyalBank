@@ -1,0 +1,86 @@
+title: "&a&lDeposit Coins"
+rows: 4
+sounds:
+  open:
+    enabled: true
+    name: "UI_BUTTON_CLICK"
+    volume: 0.7
+    pitch: 1.2
+  success:
+    enabled: true
+    name: "ENTITY_EXPERIENCE_ORB_PICKUP"
+    volume: 0.8
+    pitch: 1.4
+  fail:
+    enabled: true
+    name: "ENTITY_VILLAGER_NO"
+    volume: 0.7
+    pitch: 1.0
+  prompt:
+    enabled: true
+    name: "BLOCK_NOTE_BLOCK_PLING"
+    volume: 0.7
+    pitch: 1.5
+filler:
+  enabled: true
+  material: "GRAY_STAINED_GLASS_PANE"
+  name: "&8"
+  lore: []
+items:
+  all:
+    slot: 12
+    material: "CHEST"
+    name: "&aDeposit Whole Purse"
+    lore:
+      - "&7Deposit as much of your purse"
+      - "&7as your bank can hold."
+      - ""
+      - "&7Purse: &6{purse}"
+      - "&7Bank Space: &6{bank_space}"
+      - ""
+      - "&eClick to deposit all!"
+    action: "DEPOSIT_ALL"
+  half:
+    slot: 14
+    material: "LIME_CANDLE"
+    name: "&aDeposit Half Purse"
+    lore:
+      - "&7Deposit half of your purse."
+      - ""
+      - "&7Half Purse: &6{half_purse}"
+      - ""
+      - "&eClick to deposit half!"
+    action: "DEPOSIT_HALF"
+  custom:
+    slot: 16
+    material: "OAK_SIGN"
+    name: "&aDeposit Custom Amount"
+    lore:
+      - "&7Enter a custom amount in chat."
+      - ""
+      - "&eClick to type an amount!"
+    action: "DEPOSIT_CUSTOM"
+  back:
+    slot: 31
+    material: "ARROW"
+    name: "&aBack"
+    lore:
+      - "&7Return to the bank menu."
+    action: "BACK_MAIN"
+  custom-bottom:
+    slot: 32 # row 4, column 5
+    material: "OAK_SIGN"
+    name: "&eCustom Amount"
+    lore:
+      - "&7Also available here if you"
+      - "&7prefer the bottom-center button."
+      - ""
+      - "&eClick to type an amount!"
+    action: "DEPOSIT_CUSTOM"
+  close:
+    slot: 36
+    material: "BARRIER"
+    name: "&cClose"
+    lore:
+      - "&7Close this menu."
+    action: "CLOSE"
