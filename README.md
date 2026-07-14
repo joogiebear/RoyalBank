@@ -2,14 +2,20 @@
 
 RoyalBank is a Paper 1.21+ Vault-backed bank plugin with upgradeable account tiers, configurable GUI menus, SQLite storage, daily interest, transaction history, optional EcoItems-style upgrade costs, optional PlaceholderAPI placeholders, and bStats.
 
+Part of a suite with [RoyalAuctions](https://github.com/joogiebear/RoyalAuctions),
+[RoyalBazaar](https://github.com/joogiebear/RoyalBazaar) and
+[EconGuard](https://github.com/joogiebear/EconGuard). Each works standalone.
+
 ## Requirements
 
-- Paper 1.21+ server
-- Java 21
+- Paper 1.21+ server (tested on Paper 26.2, which itself requires Java 25 to *run*)
+- Java 21 (build target)
 - Vault
 - A Vault-compatible economy plugin
 - Optional: EcoItems or another PDC-tagged custom item plugin
 - Optional: PlaceholderAPI
+- Optional: EconGuard — if present, every bank movement is reported to the shared audit ledger
+  automatically. No configuration needed on either side.
 
 ## Install
 
@@ -164,11 +170,26 @@ This limits the bank as a safe "vault" for laundered money and gives you an audi
 enforcement (ban + rollback). To cap the damage of RMT outright, also set a maximum on your currency
 and add friction (limits/cooldown/tax) to player-to-player transfers in your economy plugin.
 
+## EconGuard integration
+
+If [EconGuard](https://github.com/joogiebear/EconGuard) is installed, RoyalBank reports every deposit,
+withdrawal, transfer, upgrade payment and interest payout to the shared ledger (`bank` source), and
+`/eg history <player>` shows them alongside that player's auction and shop activity. There is nothing
+to enable — the hook is a single `Optional` check, so RoyalBank behaves identically without it.
+
+This matters because the bank's own anti-abuse layer (above) can only see money crossing the *bank*.
+EconGuard correlates across every source, which is what catches an RMT chain that launders through an
+auction sale before it ever reaches the bank.
+
 ## Reliability
 
 - Deposits, withdrawals, upgrades, and interest move money through Vault and persist the balance in a
   single SQLite transaction. If the database write fails, the Vault side is rolled back so money is
   neither created nor destroyed.
+- RoyalBank **waits** for a Vault economy provider rather than disabling if one isn't registered the
+  moment it enables. Vault being a hard dependency says nothing about the *economy plugin*, which is a
+  separate plugin and may register its provider later — disabling would mean killing the plugin purely
+  because of plugin load order.
 - Online players' accounts are cached in memory (loaded on join, evicted on quit); GUI menus and
   PlaceholderAPI read from the cache instead of querying the database.
 - The database uses WAL mode with a busy timeout. Transaction pruning and backups run asynchronously
