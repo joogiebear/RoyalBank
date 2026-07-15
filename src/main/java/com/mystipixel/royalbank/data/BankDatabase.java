@@ -1,12 +1,14 @@
 package com.mystipixel.royalbank.data;
 
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import org.bukkit.OfflinePlayer;
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
 import java.nio.file.Path;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -14,115 +16,187 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.logging.Level;
 
 /**
- * SQLite persistence layer.
+ * Persistence layer over one HikariCP data source serving both SQLite (default, single server) and
+ * MySQL (a shared bank DB across a network). The JDBC driver and pool are delivered by Paper's library
+ * loader (see plugin.yml {@code libraries}); nothing is shaded.
  *
- * Threading contract: the shared {@link #connection} is only ever used from the main server
- * thread. Long-running maintenance ({@link #pruneTransactions} / {@link #backupTo}) opens its
- * own short-lived connection so it can run off the main thread without contending with live
- * economy writes. WAL mode + a busy timeout make concurrent connections to the same file safe.
+ * <p>Money-critical writes ({@link #saveAccountWithTransaction}, {@link #saveTransfer}) run inside a
+ * single JDBC transaction on one pooled connection, so a balance change and its audit row — or both
+ * legs of a transfer — either all commit or all roll back.
  */
 public final class BankDatabase {
+
+    public enum Type { SQLITE, MYSQL }
+
+    private static final String INSERT_TRANSACTION_SQL =
+            "INSERT INTO bank_transactions (uuid, type, amount, balance_after, created_at, note) VALUES (?, ?, ?, ?, ?, ?)";
+
     private final JavaPlugin plugin;
-    private Connection connection;
-    private File databaseFile;
-    private String jdbcUrl;
+
+    private Type type;
+    private HikariDataSource dataSource;
+    private File databaseFile; // null when MYSQL
 
     public BankDatabase(JavaPlugin plugin) {
         this.plugin = plugin;
     }
 
+    // ------------------------------------------------------------------ lifecycle
+
     public boolean connect() {
         try {
-            File dataFolder = plugin.getDataFolder();
-            if (!dataFolder.exists() && !dataFolder.mkdirs()) {
-                plugin.getLogger().severe("Could not create plugin data folder: " + dataFolder.getAbsolutePath());
-                return false;
+            ConfigurationSection storage = plugin.getConfig().getConfigurationSection("storage");
+            if (storage == null) {
+                storage = plugin.getConfig().createSection("storage");
             }
-            String fileName = plugin.getConfig().getString("database.file", "bank.db");
-            databaseFile = new File(dataFolder, fileName);
-            Class.forName("org.sqlite.JDBC");
-            jdbcUrl = "jdbc:sqlite:" + databaseFile.getAbsolutePath();
-            connection = openConnection();
+            String rawType = storage.getString("type", "SQLITE").toUpperCase(Locale.ROOT);
+            this.type = "MYSQL".equals(rawType) ? Type.MYSQL : Type.SQLITE;
+
+            HikariConfig hikari = new HikariConfig();
+            hikari.setPoolName("RoyalBank");
+
+            if (type == Type.MYSQL) {
+                ConfigurationSection my = storage.getConfigurationSection("mysql");
+                if (my == null) {
+                    my = storage.createSection("mysql");
+                }
+                String host = my.getString("host", "localhost");
+                int port = my.getInt("port", 3306);
+                String database = my.getString("database", "royalbank");
+                String props = my.getString("properties", "useSSL=false");
+                loadDriver("com.mysql.cj.jdbc.Driver");
+                hikari.setJdbcUrl("jdbc:mysql://" + host + ":" + port + "/" + database + "?" + props);
+                hikari.setDriverClassName("com.mysql.cj.jdbc.Driver");
+                hikari.setUsername(my.getString("username", "root"));
+                hikari.setPassword(my.getString("password", ""));
+                hikari.setMaximumPoolSize(Math.max(1, my.getInt("pool-size", 10)));
+            } else {
+                File dataFolder = plugin.getDataFolder();
+                if (!dataFolder.exists() && !dataFolder.mkdirs()) {
+                    plugin.getLogger().severe("Could not create plugin data folder: " + dataFolder.getAbsolutePath());
+                    return false;
+                }
+                databaseFile = new File(dataFolder, storage.getString("sqlite-file", "bank.db"));
+                loadDriver("org.sqlite.JDBC");
+                hikari.setJdbcUrl("jdbc:sqlite:" + databaseFile.getAbsolutePath());
+                hikari.setDriverClassName("org.sqlite.JDBC");
+                // SQLite is single-writer: a pool of 1 avoids SQLITE_BUSY entirely.
+                hikari.setMaximumPoolSize(1);
+                hikari.setConnectionInitSql(
+                        "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;");
+            }
+
+            this.dataSource = new HikariDataSource(hikari);
             createTables();
+            plugin.getLogger().info("RoyalBank connected to " + type + " storage.");
             return true;
-        } catch (SQLException | ClassNotFoundException exception) {
-            plugin.getLogger().severe("SQLite connection failed: " + exception.getMessage());
+        } catch (Exception exception) {
+            plugin.getLogger().severe("RoyalBank storage init failed: " + exception.getMessage());
             return false;
         }
     }
 
-    private Connection openConnection() throws SQLException {
-        Connection newConnection = DriverManager.getConnection(jdbcUrl);
-        try (Statement statement = newConnection.createStatement()) {
-            // WAL gives better read/write concurrency; NORMAL keeps durability while reducing fsyncs;
-            // busy_timeout lets a second connection wait for a lock instead of failing instantly.
-            statement.execute("PRAGMA journal_mode=WAL");
-            statement.execute("PRAGMA synchronous=NORMAL");
-            statement.execute("PRAGMA busy_timeout=5000");
-            statement.execute("PRAGMA foreign_keys=ON");
-            statement.execute("PRAGMA cache_size=-8000");   // ~8 MB page cache
-            statement.execute("PRAGMA mmap_size=67108864");  // 64 MB memory-mapped I/O
-            statement.execute("PRAGMA temp_store=MEMORY");
+    private void loadDriver(String driverClass) {
+        try {
+            Class.forName(driverClass, true, getClass().getClassLoader());
+        } catch (ClassNotFoundException exception) {
+            plugin.getLogger().log(Level.WARNING, "JDBC driver not found on classpath: " + driverClass, exception);
         }
-        return newConnection;
+    }
+
+    private boolean mysql() {
+        return type == Type.MYSQL;
     }
 
     private void createTables() throws SQLException {
-        try (Statement statement = connection.createStatement()) {
-            statement.executeUpdate("""
-                    CREATE TABLE IF NOT EXISTS player_banks (
-                        uuid TEXT PRIMARY KEY,
-                        username TEXT NOT NULL,
-                        balance REAL NOT NULL DEFAULT 0,
-                        level INTEGER NOT NULL DEFAULT 1,
-                        last_interest_claim INTEGER NOT NULL DEFAULT 0,
-                        bonus_claimed INTEGER NOT NULL DEFAULT 0
-                    )
-                    """);
-            statement.executeUpdate("""
-                    CREATE TABLE IF NOT EXISTS bank_transactions (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        uuid TEXT NOT NULL,
-                        type TEXT NOT NULL,
-                        amount REAL NOT NULL,
-                        balance_after REAL NOT NULL,
-                        created_at INTEGER NOT NULL,
-                        note TEXT NOT NULL DEFAULT ''
-                    )
-                    """);
-            statement.executeUpdate("CREATE INDEX IF NOT EXISTS idx_bank_transactions_uuid_created ON bank_transactions(uuid, created_at DESC)");
+        String banksDdl = mysql() ? """
+                CREATE TABLE IF NOT EXISTS player_banks (
+                    uuid VARCHAR(36) PRIMARY KEY,
+                    username VARCHAR(32) NOT NULL,
+                    balance DOUBLE NOT NULL DEFAULT 0,
+                    level INT NOT NULL DEFAULT 1,
+                    last_interest_claim BIGINT NOT NULL DEFAULT 0,
+                    bonus_claimed TINYINT NOT NULL DEFAULT 0
+                )
+                """ : """
+                CREATE TABLE IF NOT EXISTS player_banks (
+                    uuid TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    balance REAL NOT NULL DEFAULT 0,
+                    level INTEGER NOT NULL DEFAULT 1,
+                    last_interest_claim INTEGER NOT NULL DEFAULT 0,
+                    bonus_claimed INTEGER NOT NULL DEFAULT 0
+                )
+                """;
+        String transactionsDdl = mysql() ? """
+                CREATE TABLE IF NOT EXISTS bank_transactions (
+                    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                    uuid VARCHAR(36) NOT NULL,
+                    type VARCHAR(32) NOT NULL,
+                    amount DOUBLE NOT NULL,
+                    balance_after DOUBLE NOT NULL,
+                    created_at BIGINT NOT NULL,
+                    note VARCHAR(255) NOT NULL DEFAULT '',
+                    KEY idx_bank_transactions_uuid_created (uuid, created_at)
+                )
+                """ : """
+                CREATE TABLE IF NOT EXISTS bank_transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    uuid TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    amount REAL NOT NULL,
+                    balance_after REAL NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    note TEXT NOT NULL DEFAULT ''
+                )
+                """;
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement()) {
+            statement.executeUpdate(banksDdl);
+            statement.executeUpdate(transactionsDdl);
+            if (!mysql()) {
+                statement.executeUpdate(
+                        "CREATE INDEX IF NOT EXISTS idx_bank_transactions_uuid_created ON bank_transactions(uuid, created_at DESC)");
+            }
         }
-        migrate();
+        if (!mysql()) {
+            migrateSqlite();
+        }
     }
 
-    /** Adds columns introduced after the first release to databases created by older versions. */
-    private void migrate() throws SQLException {
+    /** Adds columns introduced after the first release to older SQLite databases. (MySQL starts current.) */
+    private void migrateSqlite() throws SQLException {
         Set<String> columns = new HashSet<>();
-        try (Statement statement = connection.createStatement();
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement();
              ResultSet resultSet = statement.executeQuery("PRAGMA table_info(player_banks)")) {
             while (resultSet.next()) {
-                columns.add(resultSet.getString("name").toLowerCase());
+                columns.add(resultSet.getString("name").toLowerCase(Locale.ROOT));
             }
         }
         if (!columns.contains("bonus_claimed")) {
-            try (Statement statement = connection.createStatement()) {
+            try (Connection connection = dataSource.getConnection();
+                 Statement statement = connection.createStatement()) {
                 statement.executeUpdate("ALTER TABLE player_banks ADD COLUMN bonus_claimed INTEGER NOT NULL DEFAULT 0");
                 plugin.getLogger().info("Migrated player_banks: added bonus_claimed column.");
             }
         }
     }
 
+    // ------------------------------------------------------------------ accounts
+
     public BankAccount getOrCreateAccount(OfflinePlayer player, int startingLevel) {
         Optional<BankAccount> existing = getAccount(player.getUniqueId());
         if (existing.isPresent()) {
             BankAccount account = existing.get();
             String currentName = player.getName() == null ? account.username() : player.getName();
-            // Case-insensitive: avoid a pointless write when only the casing of a cached name differs.
             if (!account.username().equalsIgnoreCase(currentName)) {
                 BankAccount renamed = account.withUsername(currentName);
                 saveAccount(renamed);
@@ -141,7 +215,8 @@ public final class BankDatabase {
 
     public Optional<BankAccount> getAccount(UUID uuid) {
         String sql = "SELECT uuid, username, balance, level, last_interest_claim, bonus_claimed FROM player_banks WHERE uuid = ?";
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, uuid.toString());
             try (ResultSet resultSet = statement.executeQuery()) {
                 if (!resultSet.next()) {
@@ -162,12 +237,10 @@ public final class BankDatabase {
         }
     }
 
-    /**
-     * Persists an account. Returns false (and logs) on failure so callers can react
-     * (e.g. roll back a Vault transaction) instead of silently losing the write.
-     */
+    /** Persists an account. Returns false (and logs) on failure so callers can react instead of losing the write. */
     public boolean saveAccount(BankAccount account) {
-        try (PreparedStatement statement = connection.prepareStatement(SAVE_ACCOUNT_SQL)) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(saveAccountSql())) {
             bindAccount(statement, account);
             statement.executeUpdate();
             return true;
@@ -178,72 +251,79 @@ public final class BankDatabase {
     }
 
     /**
-     * Atomically persists the account balance/level change AND its audit transaction in a single
-     * SQLite transaction. Either both land or neither does, so the ledger and the balance never diverge.
-     * Returns false on failure (with rollback) so the caller can compensate.
+     * Atomically persists the account balance/level change AND its audit transaction in one DB
+     * transaction. Either both land or neither does, so the ledger and balance never diverge.
      */
     public boolean saveAccountWithTransaction(BankAccount account, String type, double amount, double balanceAfter, String note) {
-        boolean previousAutoCommit = true;
-        try {
-            previousAutoCommit = connection.getAutoCommit();
+        try (Connection connection = dataSource.getConnection()) {
+            boolean previousAutoCommit = connection.getAutoCommit();
             connection.setAutoCommit(false);
-            try (PreparedStatement accountStatement = connection.prepareStatement(SAVE_ACCOUNT_SQL)) {
-                bindAccount(accountStatement, account);
-                accountStatement.executeUpdate();
+            try {
+                try (PreparedStatement accountStatement = connection.prepareStatement(saveAccountSql())) {
+                    bindAccount(accountStatement, account);
+                    accountStatement.executeUpdate();
+                }
+                try (PreparedStatement transactionStatement = connection.prepareStatement(INSERT_TRANSACTION_SQL)) {
+                    bindTransaction(transactionStatement, account.uuid(), type, amount, balanceAfter, note);
+                    transactionStatement.executeUpdate();
+                }
+                connection.commit();
+                return true;
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                plugin.getLogger().severe("Could not save bank account+transaction for " + account.uuid() + ": " + exception.getMessage());
+                return false;
+            } finally {
+                restoreAutoCommit(connection, previousAutoCommit);
             }
-            try (PreparedStatement transactionStatement = connection.prepareStatement(INSERT_TRANSACTION_SQL)) {
-                bindTransaction(transactionStatement, account.uuid(), type, amount, balanceAfter, note);
-                transactionStatement.executeUpdate();
-            }
-            connection.commit();
-            return true;
         } catch (SQLException exception) {
-            plugin.getLogger().severe("Could not save bank account+transaction for " + account.uuid() + ": " + exception.getMessage());
-            rollbackQuietly();
+            plugin.getLogger().severe("Bank DB connection error (account+transaction): " + exception.getMessage());
             return false;
-        } finally {
-            restoreAutoCommit(previousAutoCommit);
         }
     }
 
     /**
-     * Atomically moves money between two accounts: persists both balances AND both audit transactions
-     * in a single SQLite transaction, so a transfer can never debit one side without crediting the other.
-     * Returns false (with rollback) on failure so the caller can report that no money moved.
+     * Atomically moves money between two accounts: persists both balances AND both audit rows in one DB
+     * transaction, so a transfer can never debit one side without crediting the other.
      */
     public boolean saveTransfer(BankAccount sender, BankAccount recipient, double amount,
                                 String senderType, String senderNote,
                                 String recipientType, String recipientNote) {
-        boolean previousAutoCommit = true;
-        try {
-            previousAutoCommit = connection.getAutoCommit();
+        try (Connection connection = dataSource.getConnection()) {
+            boolean previousAutoCommit = connection.getAutoCommit();
             connection.setAutoCommit(false);
-            try (PreparedStatement accountStatement = connection.prepareStatement(SAVE_ACCOUNT_SQL)) {
-                bindAccount(accountStatement, sender);
-                accountStatement.executeUpdate();
-                bindAccount(accountStatement, recipient);
-                accountStatement.executeUpdate();
+            try {
+                try (PreparedStatement accountStatement = connection.prepareStatement(saveAccountSql())) {
+                    bindAccount(accountStatement, sender);
+                    accountStatement.executeUpdate();
+                    bindAccount(accountStatement, recipient);
+                    accountStatement.executeUpdate();
+                }
+                try (PreparedStatement transactionStatement = connection.prepareStatement(INSERT_TRANSACTION_SQL)) {
+                    bindTransaction(transactionStatement, sender.uuid(), senderType, amount, sender.balance(), senderNote);
+                    transactionStatement.executeUpdate();
+                    bindTransaction(transactionStatement, recipient.uuid(), recipientType, amount, recipient.balance(), recipientNote);
+                    transactionStatement.executeUpdate();
+                }
+                connection.commit();
+                return true;
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                plugin.getLogger().severe("Could not save bank transfer " + sender.uuid() + " -> " + recipient.uuid()
+                        + ": " + exception.getMessage());
+                return false;
+            } finally {
+                restoreAutoCommit(connection, previousAutoCommit);
             }
-            try (PreparedStatement transactionStatement = connection.prepareStatement(INSERT_TRANSACTION_SQL)) {
-                bindTransaction(transactionStatement, sender.uuid(), senderType, amount, sender.balance(), senderNote);
-                transactionStatement.executeUpdate();
-                bindTransaction(transactionStatement, recipient.uuid(), recipientType, amount, recipient.balance(), recipientNote);
-                transactionStatement.executeUpdate();
-            }
-            connection.commit();
-            return true;
         } catch (SQLException exception) {
-            plugin.getLogger().severe("Could not save bank transfer " + sender.uuid() + " -> " + recipient.uuid()
-                    + ": " + exception.getMessage());
-            rollbackQuietly();
+            plugin.getLogger().severe("Bank DB connection error (transfer): " + exception.getMessage());
             return false;
-        } finally {
-            restoreAutoCommit(previousAutoCommit);
         }
     }
 
     public boolean addTransaction(UUID uuid, String type, double amount, double balanceAfter, String note) {
-        try (PreparedStatement statement = connection.prepareStatement(INSERT_TRANSACTION_SQL)) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(INSERT_TRANSACTION_SQL)) {
             bindTransaction(statement, uuid, type, amount, balanceAfter, note);
             statement.executeUpdate();
             return true;
@@ -253,19 +333,27 @@ public final class BankDatabase {
         }
     }
 
-    private static final String SAVE_ACCOUNT_SQL = """
-            INSERT INTO player_banks (uuid, username, balance, level, last_interest_claim, bonus_claimed)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(uuid) DO UPDATE SET
-                username = excluded.username,
-                balance = excluded.balance,
-                level = excluded.level,
-                last_interest_claim = excluded.last_interest_claim,
-                bonus_claimed = excluded.bonus_claimed
-            """;
-
-    private static final String INSERT_TRANSACTION_SQL =
-            "INSERT INTO bank_transactions (uuid, type, amount, balance_after, created_at, note) VALUES (?, ?, ?, ?, ?, ?)";
+    private String saveAccountSql() {
+        return mysql() ? """
+                INSERT INTO player_banks (uuid, username, balance, level, last_interest_claim, bonus_claimed)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                    username = VALUES(username),
+                    balance = VALUES(balance),
+                    level = VALUES(level),
+                    last_interest_claim = VALUES(last_interest_claim),
+                    bonus_claimed = VALUES(bonus_claimed)
+                """ : """
+                INSERT INTO player_banks (uuid, username, balance, level, last_interest_claim, bonus_claimed)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(uuid) DO UPDATE SET
+                    username = excluded.username,
+                    balance = excluded.balance,
+                    level = excluded.level,
+                    last_interest_claim = excluded.last_interest_claim,
+                    bonus_claimed = excluded.bonus_claimed
+                """;
+    }
 
     private void bindAccount(PreparedStatement statement, BankAccount account) throws SQLException {
         statement.setString(1, account.uuid().toString());
@@ -285,15 +373,15 @@ public final class BankDatabase {
         statement.setString(6, note == null ? "" : note);
     }
 
-    private void rollbackQuietly() {
+    private void rollbackQuietly(Connection connection) {
         try {
             connection.rollback();
-        } catch (SQLException rollbackException) {
-            plugin.getLogger().severe("Could not roll back failed bank write: " + rollbackException.getMessage());
+        } catch (SQLException exception) {
+            plugin.getLogger().severe("Could not roll back failed bank write: " + exception.getMessage());
         }
     }
 
-    private void restoreAutoCommit(boolean value) {
+    private void restoreAutoCommit(Connection connection, boolean value) {
         try {
             connection.setAutoCommit(value);
         } catch (SQLException exception) {
@@ -304,7 +392,8 @@ public final class BankDatabase {
     public List<BankTransaction> getRecentTransactions(UUID uuid, int limit) {
         String sql = "SELECT id, type, amount, balance_after, created_at, note FROM bank_transactions WHERE uuid = ? ORDER BY created_at DESC, id DESC LIMIT ?";
         List<BankTransaction> transactions = new ArrayList<>();
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, uuid.toString());
             statement.setInt(2, Math.max(1, limit));
             try (ResultSet resultSet = statement.executeQuery()) {
@@ -325,10 +414,7 @@ public final class BankDatabase {
         return transactions;
     }
 
-    /**
-     * Prunes old transactions on a dedicated short-lived connection so the full-table scan never
-     * blocks the main thread. Safe to call from an async task.
-     */
+    /** Prunes old transactions on a pooled connection. The window function runs on SQLite 3.25+/MySQL 8+. */
     public int pruneTransactions(int maxPerPlayer) {
         if (maxPerPlayer <= 0) {
             return 0;
@@ -344,8 +430,8 @@ public final class BankDatabase {
                     WHERE ranked.row_number <= ?
                 )
                 """;
-        try (Connection pruneConnection = openConnection();
-             PreparedStatement statement = pruneConnection.prepareStatement(sql)) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setInt(1, maxPerPlayer);
             return statement.executeUpdate();
         } catch (SQLException exception) {
@@ -354,21 +440,26 @@ public final class BankDatabase {
         }
     }
 
+    /** The SQLite database file, or {@code null} on MySQL (where file-based backups don't apply). */
     public File getDatabaseFile() {
         return databaseFile;
     }
 
     /**
-     * Creates a consistent backup via VACUUM INTO on a dedicated short-lived connection,
-     * so it does not stall the main thread or contend with the live connection. Async-safe.
+     * Creates a consistent SQLite backup via VACUUM INTO on a pooled connection. MySQL backups are out of
+     * scope (use your DB tooling), so this returns false there.
      */
     public boolean backupTo(Path targetPath) {
         if (targetPath == null) {
             return false;
         }
+        if (mysql()) {
+            plugin.getLogger().warning("'/bank admin backup' is only available on SQLite storage; use your MySQL tooling instead.");
+            return false;
+        }
         String escapedPath = targetPath.toAbsolutePath().toString().replace("'", "''");
-        try (Connection backupConnection = openConnection();
-             Statement statement = backupConnection.createStatement()) {
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement()) {
             statement.executeUpdate("VACUUM INTO '" + escapedPath + "'");
             return true;
         } catch (SQLException exception) {
@@ -378,18 +469,18 @@ public final class BankDatabase {
     }
 
     public void close() {
-        if (connection == null) {
+        if (dataSource == null) {
             return;
         }
-        try (Statement statement = connection.createStatement()) {
-            statement.execute("PRAGMA wal_checkpoint(TRUNCATE)");
-        } catch (SQLException ignored) {
-            // best effort: keep the -wal file from growing
+        if (!mysql()) {
+            try (Connection connection = dataSource.getConnection();
+                 Statement statement = connection.createStatement()) {
+                statement.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+            } catch (SQLException ignored) {
+                // best effort: keep the -wal file from growing
+            }
         }
-        try {
-            connection.close();
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("Could not close SQLite database: " + exception.getMessage());
-        }
+        dataSource.close();
+        dataSource = null;
     }
 }

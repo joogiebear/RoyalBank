@@ -38,8 +38,18 @@ transactions:
   max-per-player: 100
   prune-on-startup: true
 
-database:
-  file: "bank.db"
+# Storage backend. SQLITE (default, single server) or MYSQL (a shared bank DB across servers).
+storage:
+  type: SQLITE
+  sqlite-file: "bank.db"
+  mysql:
+    host: localhost
+    port: 3306
+    database: royalbank
+    username: root
+    password: ""
+    properties: "useSSL=false&allowPublicKeyRetrieval=true"
+    pool-size: 10
 
 # Anti-abuse / RMT detection. RoyalBank watches money entering and leaving the bank; it cannot see
 # purse-to-purse transfers (handle those in your economy plugin), but large deposits and rapid balance
