@@ -40,9 +40,8 @@ slots:
       - "%upgrade_info%"
       - ""
       - "&eClick to confirm!"
-    location:
-      row: 2
-      column: 3
+    row: 2
+    column: 3
     left-click:
       - id: confirm_upgrade
 
@@ -53,16 +52,14 @@ slots:
       - "&7Interest Cap: &6%max_interest%"
       - ""
       - "%upgrade_info%"
-    location:
-      row: 2
-      column: 5
+    row: 2
+    column: 5
 
   - item: red_wool name:"&c&lCancel"
     lore:
       - "&7Return to the main bank menu."
-    location:
-      row: 2
-      column: 7
+    row: 2
+    column: 7
     left-click:
       - id: open_menu
         args:

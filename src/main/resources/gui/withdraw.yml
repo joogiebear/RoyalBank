@@ -43,9 +43,8 @@ slots:
       - "&7Bank: &6%balance%"
       - ""
       - "&eClick to withdraw all!"
-    location:
-      row: 2
-      column: 2
+    row: 2
+    column: 2
     left-click:
       - id: withdraw
         args:
@@ -58,9 +57,8 @@ slots:
       - "&7Half: &6%half_balance%"
       - ""
       - "&eClick to withdraw half!"
-    location:
-      row: 2
-      column: 4
+    row: 2
+    column: 4
     left-click:
       - id: withdraw
         args:
@@ -73,9 +71,8 @@ slots:
       - "&7Amount: &6%twenty_balance%"
       - ""
       - "&eClick to withdraw 20%!"
-    location:
-      row: 2
-      column: 6
+    row: 2
+    column: 6
     left-click:
       - id: withdraw
         args:
@@ -87,9 +84,8 @@ slots:
       - "&7Shorthand works too (5k, 5m, 5b)."
       - ""
       - "&eClick, then type an amount!"
-    location:
-      row: 2
-      column: 8
+    row: 2
+    column: 8
     left-click:
       - id: withdraw
         args:
@@ -99,16 +95,14 @@ slots:
     lore:
       - "&7Bank: &6%balance%"
       - "&7Purse: &6%purse%"
-    location:
-      row: 3
-      column: 5
+    row: 3
+    column: 5
 
   - item: arrow name:"&e&lBack"
     lore:
       - "&7Return to the main bank menu."
-    location:
-      row: 4
-      column: 4
+    row: 4
+    column: 4
     left-click:
       - id: open_menu
         args:
@@ -117,8 +111,7 @@ slots:
   - item: barrier name:"&c&lClose"
     lore:
       - "&7Close this menu."
-    location:
-      row: 4
-      column: 6
+    row: 4
+    column: 6
     left-click:
       - id: close_inventory

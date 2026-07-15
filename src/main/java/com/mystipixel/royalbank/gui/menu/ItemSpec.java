@@ -1,44 +1,58 @@
 package com.mystipixel.royalbank.gui.menu;
 
 import com.mystipixel.royalbank.util.Text;
+import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.inventory.meta.SkullMeta;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * Parses the EcoMenus inline item syntax used across the Royal suite, e.g.
  * <pre>gold_block hide_attributes name:"&6Bank Upgrades"</pre>
  * The first token is a vanilla {@link Material}; the rest are flags ({@code hide_enchants},
- * {@code hide_attributes}) and {@code name:"..."}. Lore is supplied separately from the slot's
- * {@code lore:} list. Names/lore may contain {@code %placeholders%}, filled at render time via
- * {@link #build}.
+ * {@code hide_attributes}) and {@code key:"value"} modifiers.
+ *
+ * <p>Player heads follow the same convention the eco suite uses:
+ * <pre>player_head texture:&lt;base64&gt;      # a custom head from a base64 texture value
+ * player_head head:&lt;player&gt;             # a specific player's head (e.g. head:%player%)</pre>
+ *
+ * <p>Names/lore/head-owner may contain {@code %placeholders%}, filled at render time via {@link #build}.
  */
 public final class ItemSpec {
 
     private final Material material;
     private final String rawName;      // may be null
+    private final String texture;      // base64 head texture, may be null
+    private final String head;         // player-head owner name/%placeholder%, may be null
     private final boolean hideEnchants;
     private final boolean hideAttributes;
 
-    private ItemSpec(Material material, String rawName, boolean hideEnchants, boolean hideAttributes) {
+    private ItemSpec(Material material, String rawName, String texture, String head,
+                     boolean hideEnchants, boolean hideAttributes) {
         this.material = material;
         this.rawName = rawName;
+        this.texture = texture;
+        this.head = head;
         this.hideEnchants = hideEnchants;
         this.hideAttributes = hideAttributes;
     }
 
     public static ItemSpec parse(String raw) {
         if (raw == null || raw.isBlank()) {
-            return new ItemSpec(Material.STONE, null, false, false);
+            return new ItemSpec(Material.STONE, null, null, null, false, false);
         }
         List<String> tokens = tokenize(raw.trim());
         Material material = matchMaterial(tokens.isEmpty() ? "stone" : tokens.get(0));
         String name = null;
+        String texture = null;
+        String head = null;
         boolean hideEnch = false;
         boolean hideAttr = false;
         for (int i = 1; i < tokens.size(); i++) {
@@ -49,12 +63,16 @@ public final class ItemSpec {
                 hideAttr = true;
             } else if (t.regionMatches(true, 0, "name:", 0, 5)) {
                 name = stripQuotes(t.substring(5));
+            } else if (t.regionMatches(true, 0, "texture:", 0, 8)) {
+                texture = stripQuotes(t.substring(8));
+            } else if (t.regionMatches(true, 0, "head:", 0, 5)) {
+                head = stripQuotes(t.substring(5));
             }
         }
-        return new ItemSpec(material, name, hideEnch, hideAttr);
+        return new ItemSpec(material, name, texture, head, hideEnch, hideAttr);
     }
 
-    /** Build the stack, filling {@code %placeholders%} in name/lore. */
+    /** Build the stack, filling {@code %placeholders%} in name/lore (and the head owner). */
     public ItemStack build(Map<String, String> placeholders, List<String> lore) {
         ItemStack item = new ItemStack(material);
         ItemMeta meta = item.getItemMeta();
@@ -75,9 +93,28 @@ public final class ItemSpec {
             if (hideAttributes) {
                 meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
             }
+            applyHeadTexture(item, meta, placeholders);
             item.setItemMeta(meta);
         }
         return item;
+    }
+
+    /** Apply a base64 {@code texture:} or a {@code head:} owner to a player-head, the eco-suite way. */
+    private void applyHeadTexture(ItemStack item, ItemMeta meta, Map<String, String> placeholders) {
+        if (item.getType() != Material.PLAYER_HEAD || !(meta instanceof SkullMeta skull)) {
+            return;
+        }
+        try {
+            if (texture != null && !texture.isBlank()) {
+                com.destroystokyo.paper.profile.PlayerProfile profile = Bukkit.createProfile(UUID.randomUUID());
+                profile.setProperty(new com.destroystokyo.paper.profile.ProfileProperty("textures", texture));
+                skull.setPlayerProfile(profile);
+            } else if (head != null && !head.isBlank()) {
+                skull.setOwningPlayer(Bukkit.getOfflinePlayer(apply(head, placeholders)));
+            }
+        } catch (Throwable ignored) {
+            // a malformed texture must never break the menu
+        }
     }
 
     private static Material matchMaterial(String raw) {
