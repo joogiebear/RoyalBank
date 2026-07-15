@@ -1,15 +1,7 @@
 package com.mystipixel.royalbank.config;
 
-import com.mystipixel.royalbank.gui.BankGuiAction;
-import org.bukkit.Material;
-import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
-import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.plugin.java.JavaPlugin;
-
-import java.io.File;
-import java.util.List;
-import java.util.Locale;
 
 public final class ConfigValidator {
     private final JavaPlugin plugin;
@@ -22,11 +14,7 @@ public final class ConfigValidator {
 
     public void validate() {
         validateMainConfig();
-        validateGuiFile("main.yml");
-        validateGuiFile("deposit.yml");
-        validateGuiFile("withdraw.yml");
-        validateGuiFile("transactions.yml");
-        validateGuiFile("confirm-upgrade.yml");
+        // Menu layouts (gui/*.yml) are validated leniently by the menu engine itself at load time.
     }
 
     private void validateMainConfig() {
@@ -98,59 +86,6 @@ public final class ConfigValidator {
             }
         }
         return cap;
-    }
-
-    private void validateGuiFile(String fileName) {
-        File file = new File(plugin.getDataFolder(), "gui/" + fileName);
-        if (!file.exists()) {
-            return;
-        }
-        FileConfiguration config = YamlConfiguration.loadConfiguration(file);
-        int rows = config.getInt("rows", 4);
-        if (rows < 1 || rows > 6) {
-            warn("gui/" + fileName + " rows should be between 1 and 6.");
-        }
-        int size = Math.max(1, Math.min(6, rows)) * 9;
-        ConfigurationSection items = config.getConfigurationSection("items");
-        if (items == null) {
-            return;
-        }
-        for (String key : items.getKeys(false)) {
-            ConfigurationSection item = items.getConfigurationSection(key);
-            if (item == null) {
-                continue;
-            }
-            int slot = item.getInt("slot", 1);
-            if (slot < 1 || slot > size) {
-                warn("gui/" + fileName + " item '" + key + "' has slot " + slot + " outside 1-" + size + ".");
-            }
-            String materialName = item.getString("material", "STONE");
-            Material material = Material.matchMaterial(materialName == null ? "STONE" : materialName);
-            if (material == null || material.isAir()) {
-                warn("gui/" + fileName + " item '" + key + "' has invalid material: " + materialName + ".");
-            }
-            String action = item.getString("action", "NONE");
-            try {
-                BankGuiAction.valueOf(action.toUpperCase(Locale.ROOT));
-            } catch (IllegalArgumentException exception) {
-                warn("gui/" + fileName + " item '" + key + "' has invalid action: " + action + ".");
-            }
-        }
-
-        List<Integer> transactionSlots = config.getIntegerList("transaction-slots");
-        for (int slot : transactionSlots) {
-            if (slot < 1 || slot > size) {
-                warn("gui/" + fileName + " transaction slot " + slot + " is outside 1-" + size + ".");
-            }
-        }
-
-        ConfigurationSection emptyItem = config.getConfigurationSection("empty-item");
-        if (emptyItem != null) {
-            int emptySlot = emptyItem.getInt("slot", 14);
-            if (emptySlot < 1 || emptySlot > size) {
-                warn("gui/" + fileName + " empty-item slot " + emptySlot + " is outside 1-" + size + ".");
-            }
-        }
     }
 
     private void warn(String message) {

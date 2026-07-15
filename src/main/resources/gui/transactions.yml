@@ -1,61 +1,60 @@
-title: "&d&lBank Transactions"
-rows: 4
+# RoyalBank - transaction history. The mask '0' slots are filled with your recent transactions
+# (newest first); '1' slots are filler. See main.yml for the effect reference.
+title: "&d&lTransactions"
+rows: 6
+
 sounds:
   open:
     enabled: true
-    name: "UI_BUTTON_CLICK"
+    name: UI_BUTTON_CLICK
     volume: 0.7
     pitch: 1.2
   success:
     enabled: true
-    name: "ENTITY_EXPERIENCE_ORB_PICKUP"
+    name: ENTITY_EXPERIENCE_ORB_PICKUP
     volume: 0.8
     pitch: 1.4
   fail:
     enabled: true
-    name: "ENTITY_VILLAGER_NO"
+    name: ENTITY_VILLAGER_NO
     volume: 0.7
     pitch: 1.0
   prompt:
     enabled: true
-    name: "BLOCK_NOTE_BLOCK_PLING"
+    name: BLOCK_NOTE_BLOCK_PLING
     volume: 0.7
     pitch: 1.5
-filler:
-  enabled: true
-  material: "GRAY_STAINED_GLASS_PANE"
-  name: "&8"
-  lore: []
-transaction-slots:
-  - 10
-  - 11
-  - 12
-  - 13
-  - 14
-  - 15
-  - 16
-  - 20
-  - 21
-  - 22
-empty-item:
-  slot: 14
-  material: "PAPER"
-  name: "&eNo Transactions Yet"
-  lore:
-    - "&7Deposits, withdrawals, interest,"
-    - "&7bonuses, and upgrades will appear here."
-items:
-  back:
-    slot: 32
-    material: "ARROW"
-    name: "&aBack"
+
+pages:
+  - page: 1
+    mask:
+      items:
+        - gray_stained_glass_pane
+      pattern:
+        - "111111111"
+        - "100000001"
+        - "100000001"
+        - "100000001"
+        - "100000001"
+        - "111111111"
+
+slots:
+  - item: arrow name:"&e&lBack"
     lore:
-      - "&7Return to the bank menu."
-    action: "BACK_MAIN"
-  close:
-    slot: 36
-    material: "BARRIER"
-    name: "&cClose"
+      - "&7Return to the main bank menu."
+    location:
+      row: 6
+      column: 4
+    left-click:
+      - id: open_menu
+        args:
+          menu: main
+
+  - item: barrier name:"&c&lClose"
     lore:
       - "&7Close this menu."
-    action: "CLOSE"
+    location:
+      row: 6
+      column: 6
+    left-click:
+      - id: close_inventory

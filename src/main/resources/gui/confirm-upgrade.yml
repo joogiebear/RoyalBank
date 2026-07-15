@@ -1,46 +1,69 @@
+# RoyalBank - upgrade confirmation. See main.yml for the effect + placeholder reference.
 title: "&6&lConfirm Upgrade"
 rows: 3
+
 sounds:
   open:
     enabled: true
-    name: "UI_BUTTON_CLICK"
+    name: UI_BUTTON_CLICK
     volume: 0.7
     pitch: 1.2
   success:
     enabled: true
-    name: "ENTITY_EXPERIENCE_ORB_PICKUP"
+    name: ENTITY_EXPERIENCE_ORB_PICKUP
     volume: 0.8
     pitch: 1.4
   fail:
     enabled: true
-    name: "ENTITY_VILLAGER_NO"
+    name: ENTITY_VILLAGER_NO
     volume: 0.7
     pitch: 1.0
   prompt:
     enabled: true
-    name: "BLOCK_NOTE_BLOCK_PLING"
+    name: BLOCK_NOTE_BLOCK_PLING
     volume: 0.7
     pitch: 1.5
-filler:
-  enabled: true
-  material: "GRAY_STAINED_GLASS_PANE"
-  name: "&8"
-  lore: []
-items:
-  confirm:
-    slot: 12
-    material: "LIME_CONCRETE"
-    name: "&aConfirm Upgrade"
+
+pages:
+  - page: 1
+    mask:
+      items:
+        - gray_stained_glass_pane
+      pattern:
+        - "111111111"
+        - "111111111"
+        - "111111111"
+
+slots:
+  - item: lime_wool name:"&a&lConfirm Upgrade"
     lore:
-      - "{upgrade_info}"
+      - "%upgrade_info%"
       - ""
-      - "&cThis will remove the listed coins/items."
-      - "&eClick to confirm."
-    action: "CONFIRM_UPGRADE"
-  cancel:
-    slot: 16
-    material: "RED_CONCRETE"
-    name: "&cCancel"
+      - "&eClick to confirm!"
+    location:
+      row: 2
+      column: 3
+    left-click:
+      - id: confirm_upgrade
+
+  - item: book name:"&e&lUpgrade Details"
     lore:
-      - "&7Return to the bank menu."
-    action: "BACK_MAIN"
+      - "&7Account: &f%account_name% &7(Lv %account_level%)"
+      - "&7Balance Limit: &6%max_balance%"
+      - "&7Interest Cap: &6%max_interest%"
+      - ""
+      - "%upgrade_info%"
+    location:
+      row: 2
+      column: 5
+
+  - item: red_wool name:"&c&lCancel"
+    lore:
+      - "&7Return to the main bank menu."
+    location:
+      row: 2
+      column: 7
+    left-click:
+      - id: open_menu
+        args:
+          menu: main

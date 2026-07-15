@@ -1,95 +1,124 @@
-title: "&c&lWithdraw Coins"
+# RoyalBank - withdraw menu. See main.yml for the effect + placeholder reference.
+title: "&c&lWithdraw"
 rows: 4
+
 sounds:
   open:
     enabled: true
-    name: "UI_BUTTON_CLICK"
+    name: UI_BUTTON_CLICK
     volume: 0.7
     pitch: 1.2
   success:
     enabled: true
-    name: "ENTITY_EXPERIENCE_ORB_PICKUP"
+    name: ENTITY_EXPERIENCE_ORB_PICKUP
     volume: 0.8
     pitch: 1.4
   fail:
     enabled: true
-    name: "ENTITY_VILLAGER_NO"
+    name: ENTITY_VILLAGER_NO
     volume: 0.7
     pitch: 1.0
   prompt:
     enabled: true
-    name: "BLOCK_NOTE_BLOCK_PLING"
+    name: BLOCK_NOTE_BLOCK_PLING
     volume: 0.7
     pitch: 1.5
-filler:
-  enabled: true
-  material: "GRAY_STAINED_GLASS_PANE"
-  name: "&8"
-  lore: []
-items:
-  all:
-    slot: 11
-    material: "DISPENSER"
-    name: "&cWithdraw Everything"
+
+pages:
+  - page: 1
+    mask:
+      items:
+        - gray_stained_glass_pane
+      pattern:
+        - "111111111"
+        - "111111111"
+        - "111111111"
+        - "111111111"
+
+slots:
+  - item: hopper name:"&c&lWithdraw All"
     lore:
       - "&7Withdraw your entire bank balance."
       - ""
-      - "&7Bank: &6{balance}"
+      - "&7Bank: &6%balance%"
       - ""
       - "&eClick to withdraw all!"
-    action: "WITHDRAW_ALL"
-  half:
-    slot: 13
-    material: "RED_CANDLE"
-    name: "&cWithdraw Half"
+    location:
+      row: 2
+      column: 2
+    left-click:
+      - id: withdraw
+        args:
+          amount: all
+
+  - item: chest_minecart name:"&c&lWithdraw Half"
     lore:
-      - "&7Withdraw half of your account."
+      - "&7Withdraw half of your balance."
       - ""
-      - "&7Half Account: &6{half_balance}"
+      - "&7Half: &6%half_balance%"
       - ""
       - "&eClick to withdraw half!"
-    action: "WITHDRAW_HALF"
-  twenty:
-    slot: 15
-    material: "GOLD_NUGGET"
-    name: "&cWithdraw 20%"
+    location:
+      row: 2
+      column: 4
+    left-click:
+      - id: withdraw
+        args:
+          amount: half
+
+  - item: minecart name:"&c&lWithdraw 20%"
     lore:
-      - "&7Withdraw 20% of your account."
+      - "&7Withdraw a fifth of your balance."
       - ""
-      - "&720% Account: &6{twenty_balance}"
+      - "&7Amount: &6%twenty_balance%"
       - ""
       - "&eClick to withdraw 20%!"
-    action: "WITHDRAW_TWENTY"
-  custom:
-    slot: 17
-    material: "SPRUCE_SIGN"
-    name: "&cWithdraw Custom Amount"
+    location:
+      row: 2
+      column: 6
+    left-click:
+      - id: withdraw
+        args:
+          amount: twenty
+
+  - item: name_tag name:"&c&lWithdraw Custom"
     lore:
-      - "&7Enter a custom amount in chat."
+      - "&7Type an exact amount in chat."
+      - "&7Shorthand works too (5k, 5m, 5b)."
       - ""
-      - "&eClick to type an amount!"
-    action: "WITHDRAW_CUSTOM"
-  back:
-    slot: 31
-    material: "ARROW"
-    name: "&aBack"
+      - "&eClick, then type an amount!"
+    location:
+      row: 2
+      column: 8
+    left-click:
+      - id: withdraw
+        args:
+          amount: custom
+
+  - item: book name:"&e&lYour Coins"
     lore:
-      - "&7Return to the bank menu."
-    action: "BACK_MAIN"
-  custom-bottom:
-    slot: 32 # row 4, column 5
-    material: "SPRUCE_SIGN"
-    name: "&eCustom Amount"
+      - "&7Bank: &6%balance%"
+      - "&7Purse: &6%purse%"
+    location:
+      row: 3
+      column: 5
+
+  - item: arrow name:"&e&lBack"
     lore:
-      - "&7Also available here if you"
-      - "&7prefer the bottom-center button."
-      - ""
-      - "&eClick to type an amount!"
-    action: "WITHDRAW_CUSTOM"
-  close:
-    slot: 36
-    material: "BARRIER"
-    name: "&cClose"
+      - "&7Return to the main bank menu."
+    location:
+      row: 4
+      column: 4
+    left-click:
+      - id: open_menu
+        args:
+          menu: main
+
+  - item: barrier name:"&c&lClose"
     lore:
       - "&7Close this menu."
-    action: "CLOSE"
+    location:
+      row: 4
+      column: 6
+    left-click:
+      - id: close_inventory

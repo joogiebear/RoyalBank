@@ -1,96 +1,142 @@
+# RoyalBank - main menu. EcoMenus-style dialect, shared with RoyalAuctions/RoyalBazaar.
+#
+# Each slot's left-click / right-click runs an effect list. Bank effects:
+#   open_menu    args: { menu: deposit | withdraw | transactions | confirm-upgrade }
+#   deposit      args: { amount: all | half | custom | <number> }
+#   withdraw     args: { amount: all | half | twenty | custom | <number> }
+#   upgrade            (opens the confirm-upgrade menu)
+#   confirm_upgrade    (performs the upgrade)
+#   claim_interest
+#   close_inventory
+#   play_sound   args: { sound: <name>, volume: <n>, pitch: <n> }
+#
+# Placeholders (use %name%): balance, max_balance, purse, half_purse, half_balance,
+#   twenty_balance, bank_space, account_level, account_name, next_interest, interest_time,
+#   max_interest, combined_balance, upgrade_unlock_balance, upgrade_info (multi-line), player.
+#
+# A slot with id: upgrade shows its locked-item / locked-lore until upgrades are unlocked.
+
 title: "&6&lBank"
 rows: 4
+
+# Sounds played by the plugin (bank extension to the dialect).
 sounds:
   open:
     enabled: true
-    name: "UI_BUTTON_CLICK"
+    name: UI_BUTTON_CLICK
     volume: 0.7
     pitch: 1.2
   success:
     enabled: true
-    name: "ENTITY_EXPERIENCE_ORB_PICKUP"
+    name: ENTITY_EXPERIENCE_ORB_PICKUP
     volume: 0.8
     pitch: 1.4
   fail:
     enabled: true
-    name: "ENTITY_VILLAGER_NO"
+    name: ENTITY_VILLAGER_NO
     volume: 0.7
     pitch: 1.0
   prompt:
     enabled: true
-    name: "BLOCK_NOTE_BLOCK_PLING"
+    name: BLOCK_NOTE_BLOCK_PLING
     volume: 0.7
     pitch: 1.5
-filler:
-  enabled: true
-  material: "GRAY_STAINED_GLASS_PANE"
-  name: "&8"
-  lore: []
-items:
-  deposit:
-    slot: 12 # row 2, column 3
-    material: "CHEST"
-    name: "&aDeposit Coins"
+
+pages:
+  - page: 1
+    mask:
+      items:
+        - gray_stained_glass_pane
+      pattern:
+        - "111111111"
+        - "111111111"
+        - "111111111"
+        - "111111111"
+
+slots:
+  - item: chest name:"&a&lDeposit Coins"
     lore:
-      - "&7Deposit coins from your purse"
-      - "&7into your protected bank account."
+      - "&7Move coins from your purse into"
+      - "&7your protected bank account."
       - ""
-      - "&7Purse: &6{purse}"
-      - "&7Bank: &6{balance}&7/&6{max_balance}"
+      - "&7Purse: &6%purse%"
+      - "&7Bank: &6%balance%&7/&6%max_balance%"
       - ""
-      - "&eClick to deposit coins!"
-    action: "OPEN_DEPOSIT"
-  withdraw:
-    slot: 14 # row 2, column 5
-    material: "DISPENSER"
-    name: "&aWithdraw Coins"
+      - "&eClick to deposit!"
+    location:
+      row: 2
+      column: 3
+    left-click:
+      - id: open_menu
+        args:
+          menu: deposit
+
+  - item: dispenser name:"&a&lWithdraw Coins"
     lore:
-      - "&7Withdraw coins from your bank"
-      - "&7back into your purse."
+      - "&7Move coins from your bank back"
+      - "&7into your purse."
       - ""
-      - "&7Bank: &6{balance}"
+      - "&7Bank: &6%balance%"
       - ""
-      - "&eClick to withdraw coins!"
-    action: "OPEN_WITHDRAW"
-  transactions:
-    slot: 16 # row 2, column 7
-    material: "MAP"
-    name: "&aRecent Transactions"
+      - "&eClick to withdraw!"
+    location:
+      row: 2
+      column: 5
+    left-click:
+      - id: open_menu
+        args:
+          menu: withdraw
+
+  - item: map name:"&b&lRecent Transactions"
     lore:
-      - "&7View your last 10 bank"
-      - "&7transactions."
+      - "&7View your latest bank activity."
       - ""
       - "&eClick to view history!"
-    action: "RECENT_TRANSACTIONS"
-  close:
-    slot: 32 # row 4, column 5
-    material: "BARRIER"
-    name: "&cClose"
+    location:
+      row: 2
+      column: 7
+    left-click:
+      - id: open_menu
+        args:
+          menu: transactions
+
+  - item: book name:"&e&lBank Information"
+    lore:
+      - "&7Account: &f%account_name% &7(Lv %account_level%)"
+      - "&7Balance: &6%balance%"
+      - "&7Limit: &6%max_balance%"
+      - "&7Purse: &6%purse%"
+      - ""
+      - "&7Next Interest: &6%next_interest%"
+      - "&7Paid In: &b%interest_time%"
+      - "&7Interest Cap: &6%max_interest%"
+    location:
+      row: 4
+      column: 6
+
+  - item: barrier name:"&c&lClose"
     lore:
       - "&7Close this menu."
-    action: "CLOSE"
-  info:
-    slot: 33 # row 4, column 6
-    material: "BOOK"
-    name: "&eBank Information"
+    location:
+      row: 4
+      column: 5
+    left-click:
+      - id: close_inventory
+
+  - id: upgrade
+    item: gold_block name:"&6&lBank Upgrades"
     lore:
-      - "&7Account: &f{account_name}"
-      - "&7Current Balance: &6{balance}"
-      - "&7Balance Limit: &6{max_balance}"
-      - "&7Purse: &6{purse}"
-      - ""
-      - "&7Next Interest: &6{next_interest}"
-      - "&7Interest Payment: &b{interest_time}"
-      - "&7Interest Cap: &6{max_interest}"
-    action: "NONE"
-  upgrades:
-    slot: 36 # row 4, column 9
-    material: "GOLD_BLOCK"
-    locked-material: "BARRIER"
-    name: "&6Bank Upgrades"
-    locked-name: "&cBank Upgrades Locked"
-    lore:
-      - "{upgrade_info}"
+      - "%upgrade_info%"
       - ""
       - "&eClick to upgrade!"
-    action: "UPGRADE"
+    locked-item: barrier name:"&c&lUpgrades Locked"
+    locked-lore:
+      - "%upgrade_info%"
+      - ""
+      - "&7Unlocks once your combined balance"
+      - "&7reaches &6%upgrade_unlock_balance%&7."
+    location:
+      row: 4
+      column: 9
+    left-click:
+      - id: upgrade

@@ -1,86 +1,110 @@
-title: "&a&lDeposit Coins"
+# RoyalBank - deposit menu. See main.yml for the effect + placeholder reference.
+title: "&a&lDeposit"
 rows: 4
+
 sounds:
   open:
     enabled: true
-    name: "UI_BUTTON_CLICK"
+    name: UI_BUTTON_CLICK
     volume: 0.7
     pitch: 1.2
   success:
     enabled: true
-    name: "ENTITY_EXPERIENCE_ORB_PICKUP"
+    name: ENTITY_EXPERIENCE_ORB_PICKUP
     volume: 0.8
     pitch: 1.4
   fail:
     enabled: true
-    name: "ENTITY_VILLAGER_NO"
+    name: ENTITY_VILLAGER_NO
     volume: 0.7
     pitch: 1.0
   prompt:
     enabled: true
-    name: "BLOCK_NOTE_BLOCK_PLING"
+    name: BLOCK_NOTE_BLOCK_PLING
     volume: 0.7
     pitch: 1.5
-filler:
-  enabled: true
-  material: "GRAY_STAINED_GLASS_PANE"
-  name: "&8"
-  lore: []
-items:
-  all:
-    slot: 12
-    material: "CHEST"
-    name: "&aDeposit Whole Purse"
+
+pages:
+  - page: 1
+    mask:
+      items:
+        - gray_stained_glass_pane
+      pattern:
+        - "111111111"
+        - "111111111"
+        - "111111111"
+        - "111111111"
+
+slots:
+  - item: hopper name:"&a&lDeposit All"
     lore:
-      - "&7Deposit as much of your purse"
-      - "&7as your bank can hold."
+      - "&7Deposit your entire purse."
       - ""
-      - "&7Purse: &6{purse}"
-      - "&7Bank Space: &6{bank_space}"
+      - "&7Purse: &6%purse%"
       - ""
       - "&eClick to deposit all!"
-    action: "DEPOSIT_ALL"
-  half:
-    slot: 14
-    material: "LIME_CANDLE"
-    name: "&aDeposit Half Purse"
+    location:
+      row: 2
+      column: 3
+    left-click:
+      - id: deposit
+        args:
+          amount: all
+
+  - item: chest_minecart name:"&a&lDeposit Half"
     lore:
       - "&7Deposit half of your purse."
       - ""
-      - "&7Half Purse: &6{half_purse}"
+      - "&7Half: &6%half_purse%"
       - ""
       - "&eClick to deposit half!"
-    action: "DEPOSIT_HALF"
-  custom:
-    slot: 16
-    material: "OAK_SIGN"
-    name: "&aDeposit Custom Amount"
+    location:
+      row: 2
+      column: 5
+    left-click:
+      - id: deposit
+        args:
+          amount: half
+
+  - item: name_tag name:"&a&lDeposit Custom"
     lore:
-      - "&7Enter a custom amount in chat."
+      - "&7Type an exact amount in chat."
+      - "&7Shorthand works too (5k, 5m, 5b)."
       - ""
-      - "&eClick to type an amount!"
-    action: "DEPOSIT_CUSTOM"
-  back:
-    slot: 31
-    material: "ARROW"
-    name: "&aBack"
+      - "&eClick, then type an amount!"
+    location:
+      row: 2
+      column: 7
+    left-click:
+      - id: deposit
+        args:
+          amount: custom
+
+  - item: book name:"&e&lYour Coins"
     lore:
-      - "&7Return to the bank menu."
-    action: "BACK_MAIN"
-  custom-bottom:
-    slot: 32 # row 4, column 5
-    material: "OAK_SIGN"
-    name: "&eCustom Amount"
+      - "&7Purse: &6%purse%"
+      - "&7Bank: &6%balance%&7/&6%max_balance%"
+      - "&7Room to deposit: &6%bank_space%"
+    location:
+      row: 3
+      column: 5
+
+  - item: arrow name:"&e&lBack"
     lore:
-      - "&7Also available here if you"
-      - "&7prefer the bottom-center button."
-      - ""
-      - "&eClick to type an amount!"
-    action: "DEPOSIT_CUSTOM"
-  close:
-    slot: 36
-    material: "BARRIER"
-    name: "&cClose"
+      - "&7Return to the main bank menu."
+    location:
+      row: 4
+      column: 4
+    left-click:
+      - id: open_menu
+        args:
+          menu: main
+
+  - item: barrier name:"&c&lClose"
     lore:
       - "&7Close this menu."
-    action: "CLOSE"
+    location:
+      row: 4
+      column: 6
+    left-click:
+      - id: close_inventory
