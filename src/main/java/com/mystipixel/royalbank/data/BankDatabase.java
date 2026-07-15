@@ -424,10 +424,10 @@ public final class BankDatabase {
                 WHERE id NOT IN (
                     SELECT id FROM (
                         SELECT id,
-                               ROW_NUMBER() OVER (PARTITION BY uuid ORDER BY created_at DESC, id DESC) AS row_number
+                               ROW_NUMBER() OVER (PARTITION BY uuid ORDER BY created_at DESC, id DESC) AS rn
                         FROM bank_transactions
                     ) ranked
-                    WHERE ranked.row_number <= ?
+                    WHERE ranked.rn <= ?
                 )
                 """;
         try (Connection connection = dataSource.getConnection();
