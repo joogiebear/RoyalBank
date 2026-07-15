@@ -60,14 +60,9 @@
             <version>2.11.6</version>
             <scope>provided</scope>
         </dependency>
-        <!-- Optional shared anti-abuse core. provided = compile against its API, not bundled;
-             RoyalBank runs fine without it (soft-dependency). Run `mvn install` in ../EconGuard first. -->
-        <dependency>
-            <groupId>com.mystipixel</groupId>
-            <artifactId>econguard</artifactId>
-            <version>1.0.0</version>
-            <scope>provided</scope>
-        </dependency>
+        <!-- EconGuard is an optional runtime soft-dependency (see plugin.yml). RoyalBank integrates with
+             it by reflection (hooks/EconGuardAuditSink), so there is no build-time dependency here and the
+             plugin builds standalone. -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
