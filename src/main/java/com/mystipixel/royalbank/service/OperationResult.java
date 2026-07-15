@@ -1,4 +1,4 @@
-package com.mystipixel.royalbank.bank;
+package com.mystipixel.royalbank.service;
 
 public record OperationResult(boolean success, String message) {
     public static OperationResult success(String message) {

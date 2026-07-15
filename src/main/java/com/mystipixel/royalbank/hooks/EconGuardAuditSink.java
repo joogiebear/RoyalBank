@@ -1,6 +1,6 @@
 package com.mystipixel.royalbank.hooks;
 
-import com.mystipixel.royalbank.bank.AuditSink;
+import com.mystipixel.royalbank.service.AuditSink;
 
 import java.lang.reflect.Method;
 import java.util.UUID;

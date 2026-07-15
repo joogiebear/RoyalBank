@@ -1,7 +1,7 @@
 package com.mystipixel.royalbank;
 
-import com.mystipixel.royalbank.bank.BankCommand;
-import com.mystipixel.royalbank.bank.BankService;
+import com.mystipixel.royalbank.command.BankCommand;
+import com.mystipixel.royalbank.service.BankService;
 import com.mystipixel.royalbank.config.ConfigValidator;
 import com.mystipixel.royalbank.config.LevelManager;
 import com.mystipixel.royalbank.data.BankDatabase;

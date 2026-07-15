@@ -1,4 +1,4 @@
-package com.mystipixel.royalbank.bank;
+package com.mystipixel.royalbank.command;
 
 import com.mystipixel.royalbank.RoyalBankPlugin;
 import com.mystipixel.royalbank.config.LevelManager;
@@ -6,6 +6,8 @@ import com.mystipixel.royalbank.data.BankAccount;
 import com.mystipixel.royalbank.data.BankTransaction;
 import com.mystipixel.royalbank.gui.BankGui;
 import com.mystipixel.royalbank.security.AbuseMonitor;
+import com.mystipixel.royalbank.service.BankService;
+import com.mystipixel.royalbank.service.OperationResult;
 import com.mystipixel.royalbank.util.Amounts;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;

@@ -1,8 +1,8 @@
 package com.mystipixel.royalbank.gui;
 
 import com.mystipixel.royalbank.RoyalBankPlugin;
-import com.mystipixel.royalbank.bank.BankService;
-import com.mystipixel.royalbank.bank.OperationResult;
+import com.mystipixel.royalbank.service.BankService;
+import com.mystipixel.royalbank.service.OperationResult;
 import com.mystipixel.royalbank.config.BankLevel;
 import com.mystipixel.royalbank.data.BankAccount;
 import com.mystipixel.royalbank.data.BankTransaction;

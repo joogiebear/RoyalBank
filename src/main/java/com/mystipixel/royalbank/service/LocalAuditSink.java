@@ -1,4 +1,4 @@
-package com.mystipixel.royalbank.bank;
+package com.mystipixel.royalbank.service;
 
 import com.mystipixel.royalbank.security.AbuseMonitor;
 

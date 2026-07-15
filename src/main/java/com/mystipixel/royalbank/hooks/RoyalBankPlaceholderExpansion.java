@@ -1,6 +1,6 @@
 package com.mystipixel.royalbank.hooks;
 
-import com.mystipixel.royalbank.bank.BankService;
+import com.mystipixel.royalbank.service.BankService;
 import com.mystipixel.royalbank.config.BankLevel;
 import com.mystipixel.royalbank.data.BankAccount;
 import me.clip.placeholderapi.expansion.PlaceholderExpansion;
