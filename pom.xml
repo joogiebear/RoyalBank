@@ -29,6 +29,10 @@
             <id>placeholderapi</id>
             <url>https://repo.extendedclip.com/content/repositories/placeholderapi/</url>
         </repository>
+        <repository>
+            <id>auxilor</id>
+            <url>https://repo.auxilor.io/repository/maven-public/</url>
+        </repository>
     </repositories>
 
     <dependencies>
@@ -74,6 +78,14 @@
             <groupId>me.clip</groupId>
             <artifactId>placeholderapi</artifactId>
             <version>2.11.6</version>
+            <scope>provided</scope>
+        </dependency>
+        <!-- eco platform: soft-dependency, resolved from the Auxilor repo. Compiled against for the
+             Items lookup API (GUI icons for eco item ids); runtime guarded by isPluginEnabled("eco"). -->
+        <dependency>
+            <groupId>com.willfp</groupId>
+            <artifactId>eco</artifactId>
+            <version>2026.28</version>
             <scope>provided</scope>
         </dependency>
         <!-- EconGuard is an optional runtime soft-dependency (see plugin.yml). RoyalBank integrates with

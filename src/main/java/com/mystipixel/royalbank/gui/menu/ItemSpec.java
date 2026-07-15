@@ -1,5 +1,6 @@
 package com.mystipixel.royalbank.gui.menu;
 
+import com.mystipixel.royalbank.hooks.EcoHook;
 import com.mystipixel.royalbank.util.Text;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
@@ -16,10 +17,11 @@ import java.util.UUID;
 /**
  * Parses the EcoMenus inline item syntax used across the Royal suite, e.g.
  * <pre>gold_block hide_attributes name:"&6Bank Upgrades"</pre>
- * The first token is a vanilla {@link Material}; the rest are flags ({@code hide_enchants},
- * {@code hide_attributes}) and {@code key:"value"} modifiers.
+ * The first token is an item lookup — a vanilla {@link Material}, or an {@code ecoitems:...} id resolved
+ * through eco when it's installed. The rest are flags ({@code hide_enchants}, {@code hide_attributes})
+ * and {@code key:"value"} modifiers.
  *
- * <p>Player heads follow the same convention the eco suite uses:
+ * <p>Player heads follow the eco convention:
  * <pre>player_head texture:&lt;base64&gt;      # a custom head from a base64 texture value
  * player_head head:&lt;player&gt;             # a specific player's head (e.g. head:%player%)</pre>
  *
@@ -27,16 +29,16 @@ import java.util.UUID;
  */
 public final class ItemSpec {
 
-    private final Material material;
+    private final String lookupId;
     private final String rawName;      // may be null
     private final String texture;      // base64 head texture, may be null
     private final String head;         // player-head owner name/%placeholder%, may be null
     private final boolean hideEnchants;
     private final boolean hideAttributes;
 
-    private ItemSpec(Material material, String rawName, String texture, String head,
+    private ItemSpec(String lookupId, String rawName, String texture, String head,
                      boolean hideEnchants, boolean hideAttributes) {
-        this.material = material;
+        this.lookupId = lookupId;
         this.rawName = rawName;
         this.texture = texture;
         this.head = head;
@@ -46,10 +48,10 @@ public final class ItemSpec {
 
     public static ItemSpec parse(String raw) {
         if (raw == null || raw.isBlank()) {
-            return new ItemSpec(Material.STONE, null, null, null, false, false);
+            return new ItemSpec("stone", null, null, null, false, false);
         }
         List<String> tokens = tokenize(raw.trim());
-        Material material = matchMaterial(tokens.isEmpty() ? "stone" : tokens.get(0));
+        String lookup = tokens.isEmpty() ? "stone" : tokens.get(0);
         String name = null;
         String texture = null;
         String head = null;
@@ -69,12 +71,21 @@ public final class ItemSpec {
                 head = stripQuotes(t.substring(5));
             }
         }
-        return new ItemSpec(material, name, texture, head, hideEnch, hideAttr);
+        return new ItemSpec(lookup, name, texture, head, hideEnch, hideAttr);
     }
 
-    /** Build the stack, filling {@code %placeholders%} in name/lore (and the head owner). */
+    /** Vanilla-only build (no eco resolution); used for mask filler and any context without an EcoHook. */
     public ItemStack build(Map<String, String> placeholders, List<String> lore) {
-        ItemStack item = new ItemStack(material);
+        return build(null, placeholders, lore);
+    }
+
+    /** Build the stack, resolving eco item ids via {@code eco} when present, and filling {@code %placeholders%}. */
+    public ItemStack build(EcoHook eco, Map<String, String> placeholders, List<String> lore) {
+        String id = apply(lookupId, placeholders);
+        ItemStack item = eco != null ? eco.resolve(id, 1) : null;
+        if (item == null || item.getType().isAir()) {
+            item = new ItemStack(vanillaMaterial(id));
+        }
         ItemMeta meta = item.getItemMeta();
         if (meta != null) {
             if (rawName != null) {
@@ -117,7 +128,15 @@ public final class ItemSpec {
         }
     }
 
-    private static Material matchMaterial(String raw) {
+    private static Material vanillaMaterial(String id) {
+        String raw = id;
+        if (id.contains(":")) {
+            String ns = id.substring(0, id.indexOf(':'));
+            if (!ns.equalsIgnoreCase("minecraft")) {
+                return Material.STONE; // unknown custom id and no eco to resolve it
+            }
+            raw = id.substring(id.indexOf(':') + 1);
+        }
         Material material = Material.matchMaterial(raw);
         return material == null || material.isAir() ? Material.STONE : material;
     }

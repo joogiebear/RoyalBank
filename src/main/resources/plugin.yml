@@ -11,6 +11,7 @@ libraries:
 depend:
   - Vault
 softdepend:
+  - eco
   - EcoItems
   - PlaceholderAPI
   - EconGuard

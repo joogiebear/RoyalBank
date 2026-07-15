@@ -2,6 +2,8 @@ package com.mystipixel.royalbank.gui;
 
 import com.mystipixel.royalbank.RoyalBankPlugin;
 import com.mystipixel.royalbank.config.BankLevel;
+import com.mystipixel.royalbank.config.ItemRequirement;
+import com.mystipixel.royalbank.config.RequirementType;
 import com.mystipixel.royalbank.data.BankAccount;
 import com.mystipixel.royalbank.data.BankTransaction;
 import com.mystipixel.royalbank.gui.menu.MenuEffect;
@@ -55,12 +57,14 @@ public final class BankGui implements Listener {
     private final RoyalBankPlugin plugin;
     private final BankService bankService;
     private final MenuManager menus;
+    private final com.mystipixel.royalbank.hooks.EcoHook eco;
     private final Map<UUID, PendingAmount> pendingChatActions = new ConcurrentHashMap<>();
 
     public BankGui(RoyalBankPlugin plugin, BankService bankService) {
         this.plugin = plugin;
         this.bankService = bankService;
         this.menus = new MenuManager(plugin);
+        this.eco = new com.mystipixel.royalbank.hooks.EcoHook();
     }
 
     public void reload() {
@@ -107,6 +111,8 @@ public final class BankGui implements Listener {
 
         if (menuId.equals(MenuManager.TRANSACTIONS)) {
             fillTransactions(player, inventory, template);
+        } else if (menuId.equals(MenuManager.CONFIRM_UPGRADE)) {
+            fillUpgradeCosts(player, inventory, template);
         }
 
         player.openInventory(inventory);
@@ -117,7 +123,7 @@ public final class BankGui implements Listener {
         boolean locked = "upgrade".equalsIgnoreCase(slot.id()) && !context.upgradeUnlocked();
         var spec = locked && slot.lockedItem() != null ? slot.lockedItem() : slot.item();
         List<String> lore = locked && slot.lockedItem() != null ? slot.lockedLore() : slot.lore();
-        return spec.build(placeholders, expandLore(player, lore));
+        return spec.build(eco, placeholders, expandLore(player, lore));
     }
 
     private void fillTransactions(Player player, Inventory inventory, MenuTemplate template) {
@@ -131,6 +137,50 @@ public final class BankGui implements Listener {
                 inventory.setItem(slots.get(i), transactionItem(transactions.get(i)));
             }
         }
+    }
+
+    /** Fill the confirm-upgrade content slots with an icon per required item, auto-generated from the tier. */
+    private void fillUpgradeCosts(Player player, Inventory inventory, MenuTemplate template) {
+        List<Integer> slots = template.contentSlots();
+        if (slots.isEmpty()) {
+            return;
+        }
+        List<ItemRequirement> requirements = bankService.nextUpgradeItemRequirements(player);
+        for (int i = 0; i < slots.size() && i < requirements.size(); i++) {
+            inventory.setItem(slots.get(i), costIcon(player, requirements.get(i)));
+        }
+    }
+
+    /** The real (eco-resolved) item for a requirement, with have/need counts appended to its lore. */
+    private ItemStack costIcon(Player player, ItemRequirement requirement) {
+        String id = requirement.type() == RequirementType.VANILLA
+                ? requirement.material().name()
+                : requirement.customItemId();
+        ItemStack icon = eco.resolve(id, requirement.amount());
+        boolean resolved = icon != null && !icon.getType().isAir();
+        if (!resolved) {
+            Material fallback = requirement.type() == RequirementType.VANILLA && requirement.material() != null
+                    ? requirement.material() : Material.PAPER;
+            icon = new ItemStack(fallback);
+        }
+        icon.setAmount(Math.max(1, Math.min(64, requirement.amount())));
+        int held = bankService.heldItemCount(player, requirement);
+        boolean enough = held >= requirement.amount();
+        ItemMeta meta = icon.getItemMeta();
+        if (meta != null) {
+            List<String> lore = meta.hasLore() ? new ArrayList<>(meta.getLore()) : new ArrayList<>();
+            // Couldn't resolve a custom item — name the icon with its id so a wrong/not-yet-created id is obvious.
+            if (!resolved && requirement.type() == RequirementType.ECOITEMS) {
+                meta.setDisplayName(Text.color("&f" + requirement.customItemId()));
+                lore.add(Text.color("&8(not loaded in eco)"));
+            }
+            lore.add(Text.color("&7Required: &f" + requirement.amount()));
+            lore.add(Text.color((enough ? "&aYou have: &f" : "&cYou have: &f") + held + "&7/&f" + requirement.amount()));
+            meta.setLore(lore);
+            meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
+            icon.setItemMeta(meta);
+        }
+        return icon;
     }
 
     // ------------------------------------------------------------------ interaction

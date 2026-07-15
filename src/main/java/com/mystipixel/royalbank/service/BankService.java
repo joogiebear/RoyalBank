@@ -543,6 +543,17 @@ public final class BankService implements Listener {
                 + "\n&eMax Interest: &f" + money(nextLevel.maxInterest());
     }
 
+    /** The item requirements for the player's next tier (empty if maxed or none). Used for GUI cost icons. */
+    public List<ItemRequirement> nextUpgradeItemRequirements(Player player) {
+        return levelManager.getNextLevel(getAccount(player).level())
+                .map(BankLevel::itemRequirements).orElse(List.of());
+    }
+
+    /** How many matching items the player currently holds toward a requirement (vanilla or eco). */
+    public int heldItemCount(Player player, ItemRequirement requirement) {
+        return countItems(player.getInventory(), requirement);
+    }
+
     public String money(double amount) {
         return Text.money(amount, plugin.getConfig().getString("settings.currency-symbol", "$"));
     }

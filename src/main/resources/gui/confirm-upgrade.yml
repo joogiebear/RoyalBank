@@ -1,28 +1,14 @@
 # RoyalBank - upgrade confirmation. See main.yml for the effect + placeholder reference.
+# The mask '0' slots (row 2) are filled automatically with an icon per required item — the real
+# item (eco items resolved via eco), with live "have / need" counts in the lore. No manual editing.
 title: "&6&lConfirm Upgrade"
-rows: 3
+rows: 4
 
 sounds:
-  open:
-    enabled: true
-    name: UI_BUTTON_CLICK
-    volume: 0.7
-    pitch: 1.2
-  success:
-    enabled: true
-    name: ENTITY_EXPERIENCE_ORB_PICKUP
-    volume: 0.8
-    pitch: 1.4
-  fail:
-    enabled: true
-    name: ENTITY_VILLAGER_NO
-    volume: 0.7
-    pitch: 1.0
-  prompt:
-    enabled: true
-    name: BLOCK_NOTE_BLOCK_PLING
-    volume: 0.7
-    pitch: 1.5
+  open:    { enabled: true, name: UI_BUTTON_CLICK, volume: 0.7, pitch: 1.2 }
+  success: { enabled: true, name: ENTITY_EXPERIENCE_ORB_PICKUP, volume: 0.8, pitch: 1.4 }
+  fail:    { enabled: true, name: ENTITY_VILLAGER_NO, volume: 0.7, pitch: 1.0 }
+  prompt:  { enabled: true, name: BLOCK_NOTE_BLOCK_PLING, volume: 0.7, pitch: 1.5 }
 
 pages:
   - page: 1
@@ -31,20 +17,11 @@ pages:
         - gray_stained_glass_pane
       pattern:
         - "111111111"
+        - "100000001"   # <- required-item icons fill these 7 slots automatically
         - "111111111"
         - "111111111"
 
 slots:
-  - item: lime_wool name:"&a&lConfirm Upgrade"
-    lore:
-      - "%upgrade_info%"
-      - ""
-      - "&eClick to confirm!"
-    row: 2
-    column: 3
-    left-click:
-      - id: confirm_upgrade
-
   - item: book name:"&e&lUpgrade Details"
     lore:
       - "&7Account: &f%account_name% &7(Lv %account_level%)"
@@ -52,14 +29,25 @@ slots:
       - "&7Interest Cap: &6%max_interest%"
       - ""
       - "%upgrade_info%"
-    row: 2
+    row: 1
     column: 5
+
+  - item: lime_wool name:"&a&lConfirm Upgrade"
+    lore:
+      - "&7Pay the cost above and unlock"
+      - "&7the next tier."
+      - ""
+      - "&eClick to confirm!"
+    row: 4
+    column: 4
+    left-click:
+      - id: confirm_upgrade
 
   - item: red_wool name:"&c&lCancel"
     lore:
       - "&7Return to the main bank menu."
-    row: 2
-    column: 7
+    row: 4
+    column: 6
     left-click:
       - id: open_menu
         args:
