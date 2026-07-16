@@ -2,34 +2,52 @@ package com.mystipixel.royalbank.api;
 
 import org.bukkit.entity.Player;
 
+import java.util.List;
 import java.util.UUID;
 
 /**
- * Public, dependency-light API for <b>shared bank accounts</b> — balances owned by an arbitrary id
- * (e.g. a group, guild, or skyblock coop) rather than a single player. Registered with Bukkit's
- * {@code ServicesManager} so other plugins can soft-depend on RoyalBank and fetch it via
- * {@code getServicesManager().getRegistration(RoyalBankAPI.class)}.
+ * Public API registered with Bukkit's {@code ServicesManager} so other plugins can soft-depend on
+ * RoyalBank and drive two things beyond a personal player account:
  *
- * <p>Shared accounts are entirely separate from personal player accounts: no levels, no interest, an
- * optional flat cap. Money still moves through Vault, so the server-wide economy total is conserved.
- * All methods are main-thread only.
+ * <ol>
+ *   <li><b>Per-profile personal banks</b> — {@link #exportAccount}/{@link #importAccount}/
+ *       {@link #resetAccount} let a caller (e.g. RoyalSkyblock) swap a player's own account row on a
+ *       profile switch, so the personal bank is per-profile while native {@code /bank} keeps working.</li>
+ *   <li><b>Id-keyed shared accounts</b> (e.g. a skyblock coop) — the {@code account*} methods run the
+ *       full bank (balance, level, upgrades, ledger) on an arbitrary account id, with a member as the
+ *       Vault/inventory counterparty.</li>
+ * </ol>
  *
- * <p>Deposit/withdraw return {@code null} on success or a colour-coded, player-facing error string.
+ * <p>Money always moves through Vault, so the server economy total is conserved. Main-thread only.
+ * {@code account*}/{@code personal} deposit-style methods return {@code null} on success or a
+ * colour-coded, player-facing error string.
  */
 public interface RoyalBankAPI {
 
-    /** The shared account's current balance, or {@code 0} if it has never been funded. */
-    double getSharedBalance(UUID accountId);
+    // ── per-profile personal bank (operates the player's own account row) ──────────
 
-    /**
-     * Move {@code amount} from the player's Vault purse into the shared account (creating/labelling it
-     * on first use). Returns {@code null} on success, else an error message.
-     */
-    String sharedDeposit(Player from, UUID accountId, String label, double amount);
+    /** Copy a player's current account state (creating a fresh one if absent). */
+    BankSnapshot exportAccount(UUID playerId);
 
-    /**
-     * Move {@code amount} from the shared account into the player's Vault purse. Returns {@code null} on
-     * success, else an error message.
-     */
-    String sharedWithdraw(Player to, UUID accountId, String label, double amount);
+    /** Overwrite a player's account with the given snapshot (and refresh RoyalBank's cache). */
+    void importAccount(UUID playerId, BankSnapshot snapshot);
+
+    /** Reset a player's account to a fresh starting account (new profile). */
+    void resetAccount(UUID playerId);
+
+    // ── id-keyed accounts (shared / coop) ──────────────────────────────────────────
+
+    double getAccountBalance(UUID accountId);
+
+    AccountView getAccountView(UUID accountId, String label);
+
+    String accountDeposit(Player purse, UUID accountId, String label, double amount);
+
+    String accountWithdraw(Player purse, UUID accountId, String label, double amount);
+
+    UpgradeView getUpgradeView(UUID accountId, String label);
+
+    String accountUpgrade(Player purse, UUID accountId, String label);
+
+    List<TransactionView> getAccountTransactions(UUID accountId, int limit);
 }

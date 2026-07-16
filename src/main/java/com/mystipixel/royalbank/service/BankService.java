@@ -4,7 +4,11 @@ import com.mystipixel.royalbank.config.BankLevel;
 import com.mystipixel.royalbank.config.ItemRequirement;
 import com.mystipixel.royalbank.config.InterestTranche;
 import com.mystipixel.royalbank.config.LevelManager;
+import com.mystipixel.royalbank.api.AccountView;
+import com.mystipixel.royalbank.api.BankSnapshot;
 import com.mystipixel.royalbank.api.RoyalBankAPI;
+import com.mystipixel.royalbank.api.TransactionView;
+import com.mystipixel.royalbank.api.UpgradeView;
 import com.mystipixel.royalbank.config.RequirementType;
 import com.mystipixel.royalbank.data.BankAccount;
 import com.mystipixel.royalbank.data.BankDatabase;
@@ -307,77 +311,159 @@ public final class BankService implements Listener, RoyalBankAPI {
         return OperationResult.success("&aTransferred " + money(amount) + " &ato " + recipientName + "&a's bank.");
     }
 
-    // ── shared accounts (RoyalBankAPI) ───────────────────────────────────────────
+    // ── RoyalBankAPI: per-profile personal bank (the player's own account row) ─────
 
-    private double sharedMaxBalance() {
-        return plugin.getConfig().getDouble("shared-accounts.max-balance", -1.0);
+    @Override
+    public BankSnapshot exportAccount(UUID playerId) {
+        return database.getAccount(playerId)
+                .map(a -> new BankSnapshot(a.balance(), a.level(), a.lastInterestClaim(), a.bonusClaimed()))
+                .orElse(new BankSnapshot(0.0, levelManager.getStartingLevel(), 0L, false));
     }
 
     @Override
-    public double getSharedBalance(UUID accountId) {
-        return round(database.getSharedBalance(accountId));
+    public void importAccount(UUID playerId, BankSnapshot snapshot) {
+        String name = database.getAccount(playerId).map(BankAccount::username).orElse(nameOf(playerId));
+        BankAccount updated = new BankAccount(playerId, name, round(snapshot.balance()),
+                snapshot.level(), snapshot.lastInterestClaim(), snapshot.bonusClaimed());
+        database.saveAccount(updated);
+        cacheIfOnline(updated);
     }
 
     @Override
-    public String sharedDeposit(Player from, UUID accountId, String label, double amount) {
+    public void resetAccount(UUID playerId) {
+        importAccount(playerId, new BankSnapshot(0.0, levelManager.getStartingLevel(), 0L, false));
+    }
+
+    private String nameOf(UUID playerId) {
+        String name = Bukkit.getOfflinePlayer(playerId).getName();
+        return name != null ? name : "Account";
+    }
+
+    // ── RoyalBankAPI: id-keyed accounts (shared / coop) ────────────────────────────
+
+    /** Load an account by arbitrary id, or a fresh unsaved one at the starting level. */
+    private BankAccount loadAccountById(UUID accountId, String label) {
+        return database.getAccount(accountId).orElseGet(() ->
+                new BankAccount(accountId, label == null ? "Account" : label, 0.0,
+                        levelManager.getStartingLevel(), 0L, false));
+    }
+
+    @Override
+    public double getAccountBalance(UUID accountId) {
+        return round(database.getAccount(accountId).map(BankAccount::balance).orElse(0.0));
+    }
+
+    @Override
+    public AccountView getAccountView(UUID accountId, String label) {
+        BankAccount account = loadAccountById(accountId, label);
+        BankLevel level = getEffectiveLevel(account.level());
+        return new AccountView(round(account.balance()), account.level(), level.name(), level.maxBalance());
+    }
+
+    @Override
+    public String accountDeposit(Player purse, UUID accountId, String label, double amount) {
         amount = Amounts.sanitize(plugin, amount);
         double minimum = plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01);
         if (amount < minimum) {
             return "&cAmount must be at least " + money(minimum) + ".";
         }
-        double balance = database.getSharedBalance(accountId);
-        double cap = sharedMaxBalance();
-        double charge;
-        if (cap >= 0.0) {
-            double space = round(cap - balance);
-            if (space <= 0.0) {
-                return "&cThe coop bank is full.";
-            }
-            charge = round(Math.min(amount, space));
-        } else {
-            charge = round(amount);
+        BankAccount account = loadAccountById(accountId, label);
+        BankLevel level = getEffectiveLevel(account.level());
+        double space = level.maxBalance() - account.balance();
+        if (space <= 0) {
+            return "&cThe bank is full. Upgrade it to store more.";
         }
+        double principal = round(Math.min(account.balance() + Math.min(amount, space), level.maxBalance()));
+        double charge = round(principal - account.balance());
         if (charge <= 0.0) {
-            return "&cThe coop bank is full.";
+            return "&cThe bank is full. Upgrade it to store more.";
         }
-        if (!vaultHook.getEconomy().has(from, charge)) {
+        if (!vaultHook.getEconomy().has(purse, charge)) {
             return "&cYou don't have enough money to deposit that.";
         }
-        EconomyResponse response = vaultHook.getEconomy().withdrawPlayer(from, charge);
+        EconomyResponse response = vaultHook.getEconomy().withdrawPlayer(purse, charge);
         if (!response.transactionSuccess()) {
             return "&cDeposit failed: " + response.errorMessage;
         }
-        double newBalance = round(balance + charge);
-        if (!database.saveSharedWithTransaction(accountId, label, newBalance, "COOP_DEPOSIT", charge,
-                from.getName() + " deposited")) {
-            compensateDeposit(from, charge, "coop deposit");
+        if (!database.saveAccountWithTransaction(account.withBalance(principal), "COOP_DEPOSIT", charge, principal,
+                purse.getName() + " deposited")) {
+            compensateDeposit(purse, charge, "account deposit");
             return "&cDeposit could not be saved; your money was refunded.";
         }
         return null;
     }
 
     @Override
-    public String sharedWithdraw(Player to, UUID accountId, String label, double amount) {
+    public String accountWithdraw(Player purse, UUID accountId, String label, double amount) {
         amount = Amounts.sanitize(plugin, amount);
         double minimum = plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01);
         if (amount < minimum) {
             return "&cAmount must be at least " + money(minimum) + ".";
         }
-        double balance = database.getSharedBalance(accountId);
-        if (balance < amount) {
-            return "&cThe coop bank doesn't have that much money.";
+        BankAccount account = loadAccountById(accountId, label);
+        if (account.balance() < amount) {
+            return "&cThe bank doesn't have that much money.";
         }
-        EconomyResponse response = vaultHook.getEconomy().depositPlayer(to, amount);
+        EconomyResponse response = vaultHook.getEconomy().depositPlayer(purse, amount);
         if (!response.transactionSuccess()) {
             return "&cWithdraw failed: " + response.errorMessage;
         }
-        double newBalance = round(balance - amount);
-        if (!database.saveSharedWithTransaction(accountId, label, newBalance, "COOP_WITHDRAW", amount,
-                to.getName() + " withdrew")) {
-            compensateWithdraw(to, amount, "coop withdrawal");
+        double newBalance = round(account.balance() - amount);
+        if (!database.saveAccountWithTransaction(account.withBalance(newBalance), "COOP_WITHDRAW", amount, newBalance,
+                purse.getName() + " withdrew")) {
+            compensateWithdraw(purse, amount, "account withdrawal");
             return "&cWithdrawal could not be saved and was reverted; please try again.";
         }
         return null;
+    }
+
+    @Override
+    public UpgradeView getUpgradeView(UUID accountId, String label) {
+        BankAccount account = loadAccountById(accountId, label);
+        BankLevel next = levelManager.getNextLevel(account.level()).orElse(null);
+        if (next == null) {
+            return new UpgradeView(true, account.level(), "", 0.0, "", getEffectiveLevel(account.level()).maxBalance());
+        }
+        List<String> items = next.itemRequirements().stream().map(ItemRequirement::displayName).toList();
+        return new UpgradeView(false, next.level(), next.name(), next.upgradeMoneyCost(),
+                items.isEmpty() ? "None" : String.join(", ", items), next.maxBalance());
+    }
+
+    @Override
+    public String accountUpgrade(Player purse, UUID accountId, String label) {
+        BankAccount account = loadAccountById(accountId, label);
+        BankLevel next = levelManager.getNextLevel(account.level()).orElse(null);
+        if (next == null) {
+            return "&eThe bank is already at the maximum level.";
+        }
+        if (!vaultHook.getEconomy().has(purse, next.upgradeMoneyCost())) {
+            return "&cYou need " + money(next.upgradeMoneyCost()) + " to upgrade.";
+        }
+        List<String> missing = getMissingItems(purse, next.itemRequirements());
+        if (!missing.isEmpty()) {
+            return "&cMissing upgrade items: &f" + String.join(", ", missing);
+        }
+        EconomyResponse response = vaultHook.getEconomy().withdrawPlayer(purse, next.upgradeMoneyCost());
+        if (!response.transactionSuccess()) {
+            return "&cUpgrade payment failed: " + response.errorMessage;
+        }
+        BankAccount updated = account.withLevel(next.level());
+        if (!database.saveAccountWithTransaction(updated, "COOP_UPGRADE", next.upgradeMoneyCost(), updated.balance(),
+                "Upgraded to " + next.name())) {
+            compensateDeposit(purse, next.upgradeMoneyCost(), "account upgrade");
+            return "&cUpgrade could not be saved. Your money was refunded; please try again.";
+        }
+        removeItems(purse, next.itemRequirements());
+        return null;
+    }
+
+    @Override
+    public List<TransactionView> getAccountTransactions(UUID accountId, int limit) {
+        List<TransactionView> out = new ArrayList<>();
+        for (BankTransaction t : database.getRecentTransactions(accountId, limit)) {
+            out.add(new TransactionView(t.type(), t.amount(), t.balanceAfter(), t.createdAt(), t.note()));
+        }
+        return out;
     }
 
     public OperationResult upgrade(Player player) {

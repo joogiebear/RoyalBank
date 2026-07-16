@@ -74,6 +74,7 @@ public final class RoyalBankPlugin extends JavaPlugin {
         fullyEnabled = true;
 
         this.bankService = new BankService(this, database, levelManager, vaultHook);
+        database.migrateSharedAccountsToPlayerBanks(levelManager.getStartingLevel());
         // Expose the shared-account API so other plugins (e.g. RoyalSkyblock coop banks) can soft-depend on it.
         getServer().getServicesManager().register(
                 com.mystipixel.royalbank.api.RoyalBankAPI.class, bankService, this,

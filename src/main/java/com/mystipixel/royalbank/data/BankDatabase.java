@@ -337,6 +337,28 @@ public final class BankDatabase {
 
     // ------------------------------------------------------------------ shared accounts
 
+    /**
+     * One-time fold of the old balance-only {@code shared_banks} rows into {@code player_banks} as full
+     * id-keyed accounts, so coop balances created before shared accounts gained levels aren't lost.
+     * Idempotent: only copies ids not already present as accounts.
+     */
+    public void migrateSharedAccountsToPlayerBanks(int startingLevel) {
+        String sql = "INSERT INTO player_banks (uuid, username, balance, level, last_interest_claim, bonus_claimed) "
+                + "SELECT id, label, balance, ?, 0, 0 FROM shared_banks "
+                + "WHERE id NOT IN (SELECT uuid FROM player_banks)";
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, startingLevel);
+            int moved = statement.executeUpdate();
+            if (moved > 0) {
+                plugin.getLogger().info("Migrated " + moved + " shared bank account(s) into player_banks.");
+            }
+        } catch (SQLException exception) {
+            // shared_banks may not exist on a brand-new install — harmless.
+            plugin.getLogger().fine("No shared_banks migration needed: " + exception.getMessage());
+        }
+    }
+
     /** A shared account's balance, or {@code 0} if it doesn't exist yet. */
     public double getSharedBalance(UUID id) {
         String sql = "SELECT balance FROM shared_banks WHERE id = ?";
