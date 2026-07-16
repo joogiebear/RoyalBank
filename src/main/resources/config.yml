@@ -1,3 +1,9 @@
+# Shared accounts: group/coop balances owned by an id rather than a player, used via the RoyalBankAPI
+# (e.g. RoyalSkyblock coop banks). Independent of personal accounts — no levels or interest.
+shared-accounts:
+  # Maximum a single shared account can hold. -1 = unlimited.
+  max-balance: -1.0
+
 settings:
   bstats-plugin-id: 31375
   currency-symbol: "$"

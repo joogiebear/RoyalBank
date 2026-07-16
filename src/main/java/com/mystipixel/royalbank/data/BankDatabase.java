@@ -157,10 +157,24 @@ public final class BankDatabase {
                     note TEXT NOT NULL DEFAULT ''
                 )
                 """;
+        String sharedDdl = mysql() ? """
+                CREATE TABLE IF NOT EXISTS shared_banks (
+                    id VARCHAR(36) PRIMARY KEY,
+                    label VARCHAR(48) NOT NULL DEFAULT '',
+                    balance DOUBLE NOT NULL DEFAULT 0
+                )
+                """ : """
+                CREATE TABLE IF NOT EXISTS shared_banks (
+                    id TEXT PRIMARY KEY,
+                    label TEXT NOT NULL DEFAULT '',
+                    balance REAL NOT NULL DEFAULT 0
+                )
+                """;
         try (Connection connection = dataSource.getConnection();
              Statement statement = connection.createStatement()) {
             statement.executeUpdate(banksDdl);
             statement.executeUpdate(transactionsDdl);
+            statement.executeUpdate(sharedDdl);
             if (!mysql()) {
                 statement.executeUpdate(
                         "CREATE INDEX IF NOT EXISTS idx_bank_transactions_uuid_created ON bank_transactions(uuid, created_at DESC)");
@@ -317,6 +331,64 @@ public final class BankDatabase {
             }
         } catch (SQLException exception) {
             plugin.getLogger().severe("Bank DB connection error (transfer): " + exception.getMessage());
+            return false;
+        }
+    }
+
+    // ------------------------------------------------------------------ shared accounts
+
+    /** A shared account's balance, or {@code 0} if it doesn't exist yet. */
+    public double getSharedBalance(UUID id) {
+        String sql = "SELECT balance FROM shared_banks WHERE id = ?";
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, id.toString());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? resultSet.getDouble("balance") : 0.0;
+            }
+        } catch (SQLException exception) {
+            plugin.getLogger().severe("Could not load shared bank " + id + ": " + exception.getMessage());
+            return 0.0;
+        }
+    }
+
+    /**
+     * Atomically upsert a shared account's balance/label AND write its audit row (keyed by the account
+     * id in {@code bank_transactions}) in one transaction — so a shared balance and its ledger never
+     * diverge, exactly like personal accounts.
+     */
+    public boolean saveSharedWithTransaction(UUID id, String label, double newBalance,
+                                             String type, double amount, String note) {
+        String upsert = mysql()
+                ? "INSERT INTO shared_banks (id, label, balance) VALUES (?, ?, ?) "
+                + "ON DUPLICATE KEY UPDATE label = VALUES(label), balance = VALUES(balance)"
+                : "INSERT INTO shared_banks (id, label, balance) VALUES (?, ?, ?) "
+                + "ON CONFLICT(id) DO UPDATE SET label = excluded.label, balance = excluded.balance";
+        try (Connection connection = dataSource.getConnection()) {
+            boolean previousAutoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(false);
+            try {
+                try (PreparedStatement statement = connection.prepareStatement(upsert)) {
+                    statement.setString(1, id.toString());
+                    statement.setString(2, label == null ? "" : label);
+                    statement.setDouble(3, newBalance);
+                    statement.executeUpdate();
+                }
+                try (PreparedStatement transactionStatement = connection.prepareStatement(INSERT_TRANSACTION_SQL)) {
+                    bindTransaction(transactionStatement, id, type, amount, newBalance, note);
+                    transactionStatement.executeUpdate();
+                }
+                connection.commit();
+                return true;
+            } catch (SQLException exception) {
+                rollbackQuietly(connection);
+                plugin.getLogger().severe("Could not save shared bank " + id + ": " + exception.getMessage());
+                return false;
+            } finally {
+                restoreAutoCommit(connection, previousAutoCommit);
+            }
+        } catch (SQLException exception) {
+            plugin.getLogger().severe("Bank DB connection error (shared account): " + exception.getMessage());
             return false;
         }
     }

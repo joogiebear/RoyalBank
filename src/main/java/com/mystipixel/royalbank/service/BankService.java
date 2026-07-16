@@ -4,6 +4,7 @@ import com.mystipixel.royalbank.config.BankLevel;
 import com.mystipixel.royalbank.config.ItemRequirement;
 import com.mystipixel.royalbank.config.InterestTranche;
 import com.mystipixel.royalbank.config.LevelManager;
+import com.mystipixel.royalbank.api.RoyalBankAPI;
 import com.mystipixel.royalbank.config.RequirementType;
 import com.mystipixel.royalbank.data.BankAccount;
 import com.mystipixel.royalbank.data.BankDatabase;
@@ -37,7 +38,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-public final class BankService implements Listener {
+public final class BankService implements Listener, RoyalBankAPI {
     private static final long DEFAULT_INTEREST_COOLDOWN_HOURS = 31L;
 
     private final JavaPlugin plugin;
@@ -304,6 +305,79 @@ public final class BankService implements Listener {
                 recipientAccount.balance(), recipientNew, true, sender.getUniqueId(), senderName);
 
         return OperationResult.success("&aTransferred " + money(amount) + " &ato " + recipientName + "&a's bank.");
+    }
+
+    // ── shared accounts (RoyalBankAPI) ───────────────────────────────────────────
+
+    private double sharedMaxBalance() {
+        return plugin.getConfig().getDouble("shared-accounts.max-balance", -1.0);
+    }
+
+    @Override
+    public double getSharedBalance(UUID accountId) {
+        return round(database.getSharedBalance(accountId));
+    }
+
+    @Override
+    public String sharedDeposit(Player from, UUID accountId, String label, double amount) {
+        amount = Amounts.sanitize(plugin, amount);
+        double minimum = plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01);
+        if (amount < minimum) {
+            return "&cAmount must be at least " + money(minimum) + ".";
+        }
+        double balance = database.getSharedBalance(accountId);
+        double cap = sharedMaxBalance();
+        double charge;
+        if (cap >= 0.0) {
+            double space = round(cap - balance);
+            if (space <= 0.0) {
+                return "&cThe coop bank is full.";
+            }
+            charge = round(Math.min(amount, space));
+        } else {
+            charge = round(amount);
+        }
+        if (charge <= 0.0) {
+            return "&cThe coop bank is full.";
+        }
+        if (!vaultHook.getEconomy().has(from, charge)) {
+            return "&cYou don't have enough money to deposit that.";
+        }
+        EconomyResponse response = vaultHook.getEconomy().withdrawPlayer(from, charge);
+        if (!response.transactionSuccess()) {
+            return "&cDeposit failed: " + response.errorMessage;
+        }
+        double newBalance = round(balance + charge);
+        if (!database.saveSharedWithTransaction(accountId, label, newBalance, "COOP_DEPOSIT", charge,
+                from.getName() + " deposited")) {
+            compensateDeposit(from, charge, "coop deposit");
+            return "&cDeposit could not be saved; your money was refunded.";
+        }
+        return null;
+    }
+
+    @Override
+    public String sharedWithdraw(Player to, UUID accountId, String label, double amount) {
+        amount = Amounts.sanitize(plugin, amount);
+        double minimum = plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01);
+        if (amount < minimum) {
+            return "&cAmount must be at least " + money(minimum) + ".";
+        }
+        double balance = database.getSharedBalance(accountId);
+        if (balance < amount) {
+            return "&cThe coop bank doesn't have that much money.";
+        }
+        EconomyResponse response = vaultHook.getEconomy().depositPlayer(to, amount);
+        if (!response.transactionSuccess()) {
+            return "&cWithdraw failed: " + response.errorMessage;
+        }
+        double newBalance = round(balance - amount);
+        if (!database.saveSharedWithTransaction(accountId, label, newBalance, "COOP_WITHDRAW", amount,
+                to.getName() + " withdrew")) {
+            compensateWithdraw(to, amount, "coop withdrawal");
+            return "&cWithdrawal could not be saved and was reverted; please try again.";
+        }
+        return null;
     }
 
     public OperationResult upgrade(Player player) {
