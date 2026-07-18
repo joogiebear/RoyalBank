@@ -1,6 +1,6 @@
 # RoyalBank - transaction history. The mask '0' slots are filled with your recent transactions
 # (newest first); '1' slots are filler. See main.yml for the effect reference.
-title: "&d&lTransactions"
+title: "&8Bank &7» &fTransactions"
 rows: 6
 
 sounds:
@@ -29,7 +29,7 @@ pages:
   - page: 1
     mask:
       items:
-        - gray_stained_glass_pane
+        - black_stained_glass_pane
       pattern:
         - "111111111"
         - "100000001"
@@ -39,7 +39,7 @@ pages:
         - "111111111"
 
 slots:
-  - item: arrow name:"&e&lBack"
+  - item: arrow name:"&7« Back"
     lore:
       - "&7Return to the main bank menu."
     row: 6
@@ -49,7 +49,7 @@ slots:
         args:
           menu: main
 
-  - item: barrier name:"&c&lClose"
+  - item: barrier name:"&cClose"
     lore:
       - "&7Close this menu."
     row: 6

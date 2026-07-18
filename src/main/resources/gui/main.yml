@@ -16,7 +16,7 @@
 #
 # A slot with id: upgrade shows its locked-item / locked-lore until upgrades are unlocked.
 
-title: "&6&lBank"
+title: "&8Bank"
 rows: 4
 
 # Sounds played by the plugin (bank extension to the dialect).
@@ -46,7 +46,7 @@ pages:
   - page: 1
     mask:
       items:
-        - gray_stained_glass_pane
+        - black_stained_glass_pane
       pattern:
         - "111111111"
         - "111111111"
@@ -110,7 +110,7 @@ slots:
     row: 4
     column: 6
 
-  - item: barrier name:"&c&lClose"
+  - item: barrier name:"&cClose"
     lore:
       - "&7Close this menu."
     row: 4

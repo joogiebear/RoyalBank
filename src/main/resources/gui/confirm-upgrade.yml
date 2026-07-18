@@ -1,7 +1,7 @@
 # RoyalBank - upgrade confirmation. See main.yml for the effect + placeholder reference.
 # The mask '0' slots (row 2) are filled automatically with an icon per required item — the real
 # item (eco items resolved via eco), with live "have / need" counts in the lore. No manual editing.
-title: "&6&lConfirm Upgrade"
+title: "&8Bank &7» &fConfirm Upgrade"
 rows: 4
 
 sounds:
@@ -14,7 +14,7 @@ pages:
   - page: 1
     mask:
       items:
-        - gray_stained_glass_pane
+        - black_stained_glass_pane
       pattern:
         - "111111111"
         - "100000001"   # <- required-item icons fill these 7 slots automatically
