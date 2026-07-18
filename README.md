@@ -35,6 +35,7 @@ Player commands:
 /bank balance
 /bank deposit <amount>
 /bank withdraw <amount>
+/bank transfer <player> <amount>
 /bank upgrade
 /bank interest
 /bank info
@@ -62,6 +63,7 @@ royalbank.use       default: true
 royalbank.deposit   default: true
 royalbank.withdraw  default: true
 royalbank.upgrade   default: true
+royalbank.transfer  default: true
 royalbank.admin     default: op
 royalbank.alerts    default: op
 ```
