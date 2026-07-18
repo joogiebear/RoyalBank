@@ -13,6 +13,7 @@ import com.mystipixel.royalbank.gui.menu.MenuTemplate;
 import com.mystipixel.royalbank.service.BankService;
 import com.mystipixel.royalbank.service.OperationResult;
 import com.mystipixel.royalbank.util.Text;
+import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.Sound;
@@ -168,15 +169,15 @@ public final class BankGui implements Listener {
         boolean enough = held >= requirement.amount();
         ItemMeta meta = icon.getItemMeta();
         if (meta != null) {
-            List<String> lore = meta.hasLore() ? new ArrayList<>(meta.getLore()) : new ArrayList<>();
+            List<Component> lore = meta.hasLore() ? new ArrayList<>(meta.lore()) : new ArrayList<>();
             // Couldn't resolve a custom item — name the icon with its id so a wrong/not-yet-created id is obvious.
             if (!resolved && requirement.type() == RequirementType.ECOITEMS) {
-                meta.setDisplayName(Text.color("&f" + requirement.customItemId()));
-                lore.add(Text.color("&8(not loaded in eco)"));
+                meta.displayName(Text.item("&f" + requirement.customItemId()));
+                lore.add(Text.item("&8(not loaded in eco)"));
             }
-            lore.add(Text.color("&7Required: &f" + requirement.amount()));
-            lore.add(Text.color((enough ? "&aYou have: &f" : "&cYou have: &f") + held + "&7/&f" + requirement.amount()));
-            meta.setLore(lore);
+            lore.add(Text.item("&7Required: &f" + requirement.amount()));
+            lore.add(Text.item((enough ? "&aYou have: &f" : "&cYou have: &f") + held + "&7/&f" + requirement.amount()));
+            meta.lore(lore);
             meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
             icon.setItemMeta(meta);
         }
@@ -443,12 +444,8 @@ public final class BankGui implements Listener {
     private ItemStack simpleItem(Material material, String name, List<String> lore) {
         ItemStack item = new ItemStack(material);
         ItemMeta meta = item.getItemMeta();
-        meta.setDisplayName(Text.color(name));
-        List<String> colored = new ArrayList<>();
-        for (String line : lore) {
-            colored.add(Text.color(line));
-        }
-        meta.setLore(colored);
+        meta.displayName(Text.item(name));
+        meta.lore(Text.items(lore));
         meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
         item.setItemMeta(meta);
         return item;

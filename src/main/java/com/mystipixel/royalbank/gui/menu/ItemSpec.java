@@ -2,6 +2,7 @@ package com.mystipixel.royalbank.gui.menu;
 
 import com.mystipixel.royalbank.hooks.EcoHook;
 import com.mystipixel.royalbank.util.Text;
+import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.inventory.ItemFlag;
@@ -89,14 +90,14 @@ public final class ItemSpec {
         ItemMeta meta = item.getItemMeta();
         if (meta != null) {
             if (rawName != null) {
-                meta.setDisplayName(Text.color(apply(rawName, placeholders)));
+                meta.displayName(Text.item(apply(rawName, placeholders)));
             }
             if (lore != null && !lore.isEmpty()) {
-                List<String> lines = new ArrayList<>(lore.size());
+                List<Component> lines = new ArrayList<>(lore.size());
                 for (String line : lore) {
-                    lines.add(Text.color(apply(line, placeholders)));
+                    lines.add(Text.item(apply(line, placeholders)));
                 }
-                meta.setLore(lines);
+                meta.lore(lines);
             }
             if (hideEnchants) {
                 meta.addItemFlags(ItemFlag.HIDE_ENCHANTS);
