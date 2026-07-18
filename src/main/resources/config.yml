@@ -5,7 +5,6 @@ shared-accounts:
   max-balance: -1.0
 
 settings:
-  bstats-plugin-id: 31375
   currency-symbol: "$"
   starting-level: 1
   interest-on-join: true

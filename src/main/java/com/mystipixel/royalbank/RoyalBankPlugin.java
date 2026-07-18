@@ -20,6 +20,9 @@ import org.bukkit.event.server.ServiceRegisterEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
 public final class RoyalBankPlugin extends JavaPlugin {
+
+    /** bStats project id. Identifies the plugin, not the server, so it is fixed rather than configurable. */
+    private static final int BSTATS_PLUGIN_ID = 31375;
     private VaultHook vaultHook;
     private BankDatabase database;
     private LevelManager levelManager;
@@ -181,18 +184,12 @@ public final class RoyalBankPlugin extends JavaPlugin {
     }
 
     private void setupMetrics() {
-        int pluginId = getConfig().getInt("settings.bstats-plugin-id", 0);
-        if (pluginId <= 0) {
-            getLogger().warning("bStats is included but not active yet. Set settings.bstats-plugin-id in config.yml after creating the RoyalBank project on bstats.org.");
-            return;
-        }
 
-        this.metrics = new Metrics(this, pluginId);
+        this.metrics = new Metrics(this, BSTATS_PLUGIN_ID);
         metrics.addCustomChart(new SimplePie("account_tiers_configured", () -> String.valueOf(levelManager.getLevels().size())));
         metrics.addCustomChart(new SimplePie("interest_cooldown_hours", () -> String.valueOf(getConfig().getLong("settings.interest-cooldown-hours", 31L))));
         metrics.addCustomChart(new SimplePie("first_deposit_bonus_enabled", () -> String.valueOf(getConfig().getBoolean("settings.first-deposit-bonus.enabled", true))));
         metrics.addCustomChart(new SimplePie("upgrade_unlock_enabled", () -> String.valueOf(getConfig().getDouble("settings.upgrade-unlock-combined-balance", 0.0) > 0.0)));
-        getLogger().info("bStats metrics enabled for plugin ID " + pluginId + ".");
     }
 
     public void reloadRoyalBank() {
