@@ -1,3 +1,14 @@
+## 2026.32.0 — 2026-08-07
+
+### ✨ Features
+- report anonymous usage stats via bStats (`9f1cb43`)
+
+### 🐛 Fixes
+- stop menus rendering in italic (`d77fdb7`)
+
+### 📝 Documentation
+- document /bank transfer (`4601997`)
+
 ## 2026.29.1 — 2026-07-17
 
 ### 🐛 Fixes
