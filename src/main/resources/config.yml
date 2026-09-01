@@ -37,6 +37,11 @@ settings:
   transfer:
     confirm-threshold: 100000000.0
     confirm-timeout-seconds: 30
+    # Playtime floor for bank transfers, in hours; both sender and recipient must clear it.
+    # This is the same lever RoyalTrade's min-playtime-hours pulls, and it matters that they
+    # match: gate trades but not transfers and the bank is simply the detour RMT alts take.
+    # 0 disables the gate (the default, matching RoyalTrade's default).
+    min-playtime-hours: 0.0
 
 transactions:
   max-per-player: 100

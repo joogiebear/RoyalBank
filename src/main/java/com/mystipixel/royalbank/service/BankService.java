@@ -278,6 +278,22 @@ public final class BankService implements Listener, RoyalBankAPI {
         if (recipient.getUniqueId().equals(sender.getUniqueId())) {
             return OperationResult.fail("&cYou cannot transfer money to yourself.");
         }
+        // The anti-RMT lever RoyalTrade already has: an account too new to have earned anything is
+        // the classic shape of a throwaway alt receiving a character's wealth, and a gated trade
+        // system with an ungated bank transfer just moves the traffic here. Off by default.
+        double minHours = plugin.getConfig().getDouble("settings.transfer.min-playtime-hours", 0.0);
+        if (minHours > 0) {
+            String required = String.format(Locale.US, "%.0f", minHours);
+            if (playtimeHours(sender) < minHours) {
+                return OperationResult.fail("&cBank transfers unlock after &f" + required
+                        + "h&c of playtime.");
+            }
+            if (playtimeHours(recipient) < minHours) {
+                String name = recipient.getName() != null ? recipient.getName() : "That player";
+                return OperationResult.fail("&c" + name + " hasn't played &f" + required
+                        + "h&c yet, so they can't receive bank transfers.");
+            }
+        }
         amount = Amounts.sanitize(plugin, amount);
         double minimum = plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01);
         if (amount < minimum) {
@@ -732,6 +748,11 @@ public final class BankService implements Listener, RoyalBankAPI {
 
     public double getWalletBalance(Player player) {
         return vaultHook.getEconomy().getBalance(player);
+    }
+
+    /** Hours played, from the same statistic RoyalTrade's gate reads. Works for offline players too. */
+    private double playtimeHours(OfflinePlayer player) {
+        return player.getStatistic(org.bukkit.Statistic.PLAY_ONE_MINUTE) / 20.0 / 3600.0;
     }
 
     public List<BankTransaction> getRecentTransactions(Player player, int limit) {
