@@ -24,9 +24,8 @@ settings:
   max-daily-interest:
     enabled: true
     amount: 1500000.0
-  # How long a GUI "custom amount" chat prompt stays active. After this, a normal chat
-  # message is no longer captured as a deposit/withdraw amount.
-  custom-amount-timeout-seconds: 60
+  # GUI "custom amount" entry happens on a throwaway sign (like the rest of the suite),
+  # so amounts never appear in public chat and there is no capture window to time out.
   messages-prefix: "&6&lRoyalBank &8» &r"
   amount-limits:
     min-transaction: 0.01

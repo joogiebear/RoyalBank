@@ -83,7 +83,9 @@ public final class RoyalBankPlugin extends JavaPlugin {
                 com.mystipixel.royalbank.api.RoyalBankAPI.class, bankService, this,
                 org.bukkit.plugin.ServicePriority.Normal);
         setupAuditSink();
-        this.bankGui = new BankGui(this, bankService);
+        com.mystipixel.royalbank.gui.SignInput signInput = new com.mystipixel.royalbank.gui.SignInput(this);
+        getServer().getPluginManager().registerEvents(signInput, this);
+        this.bankGui = new BankGui(this, bankService, signInput);
         new ConfigValidator(this, levelManager).validate();
         pruneTransactionsIfEnabled();
 

@@ -24,8 +24,6 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
-import org.bukkit.event.player.AsyncPlayerChatEvent;
-import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemFlag;
@@ -40,8 +38,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * The bank menus, rendered from EcoMenus-dialect {@code gui/*.yml} templates via the shared
@@ -59,13 +55,14 @@ public final class BankGui implements Listener {
     private final BankService bankService;
     private final MenuManager menus;
     private final com.mystipixel.royalbank.hooks.EcoHook eco;
-    private final Map<UUID, PendingAmount> pendingChatActions = new ConcurrentHashMap<>();
+    private final SignInput signInput;
 
-    public BankGui(RoyalBankPlugin plugin, BankService bankService) {
+    public BankGui(RoyalBankPlugin plugin, BankService bankService, SignInput signInput) {
         this.plugin = plugin;
         this.bankService = bankService;
         this.menus = new MenuManager(plugin);
         this.eco = new com.mystipixel.royalbank.hooks.EcoHook();
+        this.signInput = signInput;
     }
 
     public void reload() {
@@ -287,39 +284,25 @@ public final class BankGui implements Listener {
         runAndRefresh(player, menuId, bankService.withdraw(player, amount));
     }
 
+    /**
+     * Ask for a custom amount on a throwaway sign — the suite's shared input (RoyalTrade,
+     * RoyalBazaar, RoyalAuctions all use it). The amount stays out of public chat, there is no
+     * timed capture window to reason about, and the callback arrives on the main thread.
+     */
     private void promptForAmount(Player player, String menuId, PendingAmount.Kind kind) {
-        pendingChatActions.put(player.getUniqueId(), new PendingAmount(kind, System.currentTimeMillis()));
-        player.closeInventory();
         playSound(menus.get(menuId), player, "sounds.prompt");
-        if (kind == PendingAmount.Kind.DEPOSIT) {
-            msg(player, "prompt-deposit", "&aType the amount you want to deposit in chat. Type &ecancel &ato stop.");
-        } else {
-            msg(player, "prompt-withdraw", "&cType the amount you want to withdraw in chat. Type &ecancel &cto stop.");
-        }
-    }
-
-    @EventHandler(priority = EventPriority.HIGHEST)
-    public void onPlayerChat(AsyncPlayerChatEvent event) {
-        Player player = event.getPlayer();
-        PendingAmount pending = pendingChatActions.remove(player.getUniqueId());
-        if (pending == null) {
-            return;
-        }
-        // Only consume the chat line while the prompt is still fresh, so a stale prompt never swallows
-        // a normal message or moves money later.
-        if (System.currentTimeMillis() - pending.createdAt() > promptTimeoutMillis()) {
-            return;
-        }
-        event.setCancelled(true);
-        String message = event.getMessage().trim();
-        Bukkit.getScheduler().runTask(plugin, () -> handleCustomAmount(player, pending.kind(), message));
+        boolean deposit = kind == PendingAmount.Kind.DEPOSIT;
+        signInput.request(player,
+                List.of("&8^^^^^^^^^^^^^^^", deposit ? "&8Amount to deposit" : "&8Amount to withdraw",
+                        "&8(or 'cancel')"),
+                typed -> handleCustomAmount(player, kind, typed == null ? "cancel" : typed.trim()));
     }
 
     private void handleCustomAmount(Player player, PendingAmount.Kind kind, String message) {
         if (!player.isOnline()) {
             return;
         }
-        if (message.equalsIgnoreCase("cancel")) {
+        if (message.isBlank() || message.equalsIgnoreCase("cancel")) {
             msg(player, "custom-cancelled", "&eCustom bank action cancelled.");
             openMain(player);
             return;
@@ -346,11 +329,6 @@ public final class BankGui implements Listener {
     @EventHandler
     public void onInventoryClose(InventoryCloseEvent event) {
         // Nothing to track on close; the bank menus are stateless per-open.
-    }
-
-    @EventHandler
-    public void onPlayerQuit(PlayerQuitEvent event) {
-        pendingChatActions.remove(event.getPlayer().getUniqueId());
     }
 
     // ------------------------------------------------------------------ helpers
@@ -459,10 +437,6 @@ public final class BankGui implements Listener {
         return new GuiContext(account, level, purse, upgradeUnlocked);
     }
 
-    private long promptTimeoutMillis() {
-        return Math.max(5L, plugin.getConfig().getLong("settings.custom-amount-timeout-seconds", 60L)) * 1000L;
-    }
-
     private void playSound(MenuTemplate template, Player player, String path) {
         if (template == null) {
             return;
@@ -492,8 +466,12 @@ public final class BankGui implements Listener {
         plugin.getMessageManager().send(player, key, fallback);
     }
 
-    private record PendingAmount(Kind kind, long createdAt) {
+    /** Which direction a custom-amount prompt moves money. */
+    private static final class PendingAmount {
         enum Kind { DEPOSIT, WITHDRAW }
+
+        private PendingAmount() {
+        }
     }
 
     private record GuiContext(BankAccount account, BankLevel level, double purse, boolean upgradeUnlocked) {
