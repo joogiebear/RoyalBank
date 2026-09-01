@@ -1,7 +1,7 @@
 name: RoyalBank
 version: ${version}
 main: com.mystipixel.royalbank.RoyalBankPlugin
-api-version: '1.21'
+api-version: '26.2'
 author: Mystipixel
 # JDBC drivers + connection pool are downloaded at runtime by Paper's library loader.
 libraries:
