@@ -1,6 +1,6 @@
 # RoyalBank
 
-RoyalBank is a Paper 1.21+ Vault-backed bank plugin with upgradeable account tiers, configurable GUI menus, SQLite storage, daily interest, transaction history, optional EcoItems-style upgrade costs, optional PlaceholderAPI placeholders, and bStats.
+RoyalBank is a Vault-backed bank plugin for Paper 26.2 or newer with upgradeable account tiers, configurable GUI menus, SQLite storage, daily interest, transaction history, optional EcoItems-style upgrade costs, optional PlaceholderAPI placeholders, and bStats.
 
 Part of a suite with [RoyalAuctions](https://github.com/joogiebear/RoyalAuctions),
 [RoyalBazaar](https://github.com/joogiebear/RoyalBazaar) and
@@ -8,7 +8,7 @@ Part of a suite with [RoyalAuctions](https://github.com/joogiebear/RoyalAuctions
 
 ## Requirements
 
-- Paper 1.21+ server (tested on Paper 26.2, which itself requires Java 25 to *run*)
+- Paper 26.2 or newer (Java 25)
 - Java 21 (build target)
 - Vault
 - A Vault-compatible economy plugin
