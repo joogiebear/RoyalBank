@@ -83,8 +83,20 @@ public final class BankService implements Listener, RoyalBankAPI {
     public void onPlayerJoin(PlayerJoinEvent event) {
         loadAccount(event.getPlayer());
         if (plugin.getConfig().getBoolean("settings.interest-on-join", true)) {
-            // Result intentionally ignored: cooldown/empty notices are not pushed at join.
-            claimInterest(event.getPlayer(), false);
+            // Cooldown and empty-bank notices stay quiet at join — but a successful payout is
+            // announced. Interest that arrives silently either goes unnoticed or reads as a bug,
+            // and this is money the player earned. Delayed a little so it lands after the join noise.
+            OperationResult interest = claimInterest(event.getPlayer(), false);
+            if (interest.success() && interest.message() != null && !interest.message().isBlank()) {
+                Player player = event.getPlayer();
+                Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                    if (player.isOnline()) {
+                        player.sendMessage(Text.color(
+                                plugin.getConfig().getString("settings.messages-prefix", "")
+                                        + interest.message()));
+                    }
+                }, 40L);
+            }
         }
         notifyPendingFlags(event.getPlayer());
     }
