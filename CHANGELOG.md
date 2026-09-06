@@ -1,3 +1,17 @@
+## 2026.36.0 — 2026-09-06
+
+### ✨ Features
+- optional playtime floor on bank transfers (`0674e91`)
+
+### 🐛 Fixes
+- announce interest auto-claimed at join (`ab7dbbb`)
+
+### ♻️ Refactors
+- custom amounts on a sign instead of public chat (`96c89e2`)
+
+### 📝 Documentation
+- state the Paper 26.2-or-newer requirement (`eced269`)
+
 ## 2026.32.0 — 2026-08-07
 
 ### ✨ Features
