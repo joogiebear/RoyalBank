@@ -1,3 +1,8 @@
+## 2026.37.0 — 2026-09-13
+
+### 🐛 Fixes
+- release at 10:00 Central or later, not exactly 10:00 (`fae0a48`)
+
 ## 2026.36.0 — 2026-09-06
 
 ### ✨ Features
