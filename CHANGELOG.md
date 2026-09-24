@@ -1,3 +1,12 @@
+## 2026.39.1 — 2026-09-24
+
+### 🐛 Fixes
+- end prompts whose answer can never arrive (`7304516`)
+- keep the sign prompt off block entities and blocks already in use (`b441321`)
+
+### 📝 Documentation
+- add MIT license (`286c108`)
+
 ## 2026.39.0 — 2026-09-23
 
 ### 🔧 Other
