@@ -295,7 +295,14 @@ public final class BankGui implements Listener {
         signInput.request(player,
                 List.of("&8^^^^^^^^^^^^^^^", deposit ? "&8Amount to deposit" : "&8Amount to withdraw",
                         "&8(or 'cancel')"),
-                typed -> handleCustomAmount(player, kind, typed == null ? "cancel" : typed.trim()));
+                typed -> {
+                    // Another plugin's menu displaced the prompt. Reopening the bank over it would
+                    // yank the player out of whatever they just opened, so let it go.
+                    if (typed == null && !SignInput.showingOwnInventory(player)) {
+                        return;
+                    }
+                    handleCustomAmount(player, kind, typed == null ? "cancel" : typed.trim());
+                });
     }
 
     private void handleCustomAmount(Player player, PendingAmount.Kind kind, String message) {

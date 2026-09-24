@@ -6,6 +6,7 @@ import com.mystipixel.royalbank.config.ConfigValidator;
 import com.mystipixel.royalbank.config.LevelManager;
 import com.mystipixel.royalbank.data.BankDatabase;
 import com.mystipixel.royalbank.gui.BankGui;
+import com.mystipixel.royalbank.gui.SignInput;
 import com.mystipixel.royalbank.hooks.RoyalBankPlaceholderExpansion;
 import com.mystipixel.royalbank.hooks.VaultHook;
 import com.mystipixel.royalbank.message.MessageManager;
@@ -28,6 +29,7 @@ public final class RoyalBankPlugin extends JavaPlugin {
     private LevelManager levelManager;
     private BankService bankService;
     private BankGui bankGui;
+    private SignInput signInput;
     private MessageManager messageManager;
     private RoyalBankPlaceholderExpansion placeholderExpansion;
     private Metrics metrics;
@@ -83,7 +85,7 @@ public final class RoyalBankPlugin extends JavaPlugin {
                 com.mystipixel.royalbank.api.RoyalBankAPI.class, bankService, this,
                 org.bukkit.plugin.ServicePriority.Normal);
         setupAuditSink();
-        com.mystipixel.royalbank.gui.SignInput signInput = new com.mystipixel.royalbank.gui.SignInput(this);
+        this.signInput = new SignInput(this);
         getServer().getPluginManager().registerEvents(signInput, this);
         this.bankGui = new BankGui(this, bankService, signInput);
         new ConfigValidator(this, levelManager).validate();
@@ -134,6 +136,9 @@ public final class RoyalBankPlugin extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        if (signInput != null) {
+            signInput.shutdown();
+        }
         if (placeholderExpansion != null) {
             placeholderExpansion.unregister();
             placeholderExpansion = null;

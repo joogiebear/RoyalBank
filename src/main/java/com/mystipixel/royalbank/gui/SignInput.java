@@ -14,6 +14,8 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.SignChangeEvent;
+import org.bukkit.event.inventory.InventoryOpenEvent;
+import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -30,15 +32,26 @@ import java.util.function.Consumer;
  *
  * <p>Only official Paper API, no NMS or packets, so it survives version changes.
  *
- * <p>The callback runs on the main thread and receives the typed text, or {@code null} if the sign
- * could not be opened — callers need that to put the player back where they were rather than leave
- * them staring at nothing.
+ * <p>The callback runs on the main thread, exactly once per prompt that opened, and receives the
+ * typed text, or {@code null} if no answer is coming: the sign could not be placed, or the prompt was
+ * abandoned. Callers need that to put the player back where they were rather than leave them staring
+ * at nothing.
+ *
+ * <p>A prompt is abandoned when its answer can no longer arrive: it timed out, the player moved out of
+ * the server's sign-edit range or changed world, the sign was broken, or another inventory replaced
+ * the editor on their screen. Without that, one lost answer strands the caller's state for good and
+ * leaves the sign in the world.
  */
 public final class SignInput implements Listener {
 
     private static final LegacyComponentSerializer AMP = LegacyComponentSerializer.legacyAmpersand();
 
-    private record Pending(UUID player, BlockData original, Consumer<String> callback) {
+    /** How long a prompt may stay open before it is treated as abandoned. */
+    private static final long TIMEOUT_MILLIS = 60_000L;
+    /** Past roughly this distance the server discards the sign's update, so no answer can come. */
+    private static final double MAX_DISTANCE_SQUARED = 8.0 * 8.0;
+
+    private record Pending(UUID player, BlockData original, Consumer<String> callback, long deadline) {
     }
 
     private final JavaPlugin plugin;
@@ -46,11 +59,19 @@ public final class SignInput implements Listener {
 
     public SignInput(JavaPlugin plugin) {
         this.plugin = plugin;
+        Bukkit.getScheduler().runTaskTimer(plugin, this::sweep, 10L, 10L);
     }
 
     /** Open a sign editor. {@code hints} fill lines 2-4; line 1 is what the player types. */
     public void request(Player player, List<String> hints, Consumer<String> callback) {
-        pending.values().removeIf(p -> p.player().equals(player.getUniqueId()));
+        // A new prompt supersedes an old one. Its sign still has to come down, or the old spot is
+        // left as a permanent oak sign with the block it borrowed gone.
+        for (Map.Entry<Location, Pending> entry : List.copyOf(pending.entrySet())) {
+            if (entry.getValue().player().equals(player.getUniqueId())
+                    && pending.remove(entry.getKey(), entry.getValue())) {
+                restore(entry.getKey(), entry.getValue());
+            }
+        }
         // Opening a sign editor while a chest inventory is open is unreliable, so close first and
         // open the sign a tick later.
         player.closeInventory();
@@ -79,7 +100,8 @@ public final class SignInput implements Listener {
             sign.getSide(Side.FRONT).line(i + 1, AMP.deserialize(hints.get(i)));
         }
         sign.update(true, false);
-        pending.put(loc, new Pending(player.getUniqueId(), original, callback));
+        pending.put(loc, new Pending(player.getUniqueId(), original, callback,
+                System.currentTimeMillis() + TIMEOUT_MILLIS));
         player.openSign(sign, Side.FRONT);
     }
 
@@ -111,22 +133,94 @@ public final class SignInput implements Listener {
         return fallback;
     }
 
+    /**
+     * Put the borrowed block back — but only over our own sign, or the air left where it was broken.
+     * Anything else there was placed since, and overwriting it would destroy it (a container's
+     * contents with it, since block data carries none).
+     */
+    private static void restore(Location loc, Pending p) {
+        Block block = loc.getBlock();
+        Material now = block.getType();
+        if (now == Material.OAK_SIGN || now.isAir()) {
+            block.setBlockData(p.original(), false);
+        }
+    }
+
+    /** Give up on a prompt: take the sign down and tell the caller no answer is coming. */
+    private void abandon(Location loc, Pending p) {
+        if (!pending.remove(loc, p)) {
+            return;                                  // answered or cleaned up in the meantime
+        }
+        restore(loc, p);
+        Player player = Bukkit.getPlayer(p.player());
+        if (player == null) {
+            return;
+        }
+        // Close a sign editor that may still be on screen (a timeout), but not another plugin's menu
+        // that replaced it — the caller decides what to do about that.
+        if (showingOwnInventory(player)) {
+            player.closeInventory();
+        }
+        p.callback().accept(null);
+    }
+
+    /** True when nothing but the player's own inventory is open, i.e. no other menu is on screen. */
+    public static boolean showingOwnInventory(Player player) {
+        InventoryType type = player.getOpenInventory().getTopInventory().getType();
+        return type == InventoryType.CRAFTING || type == InventoryType.CREATIVE;
+    }
+
+    /** Abandon every prompt whose answer can no longer arrive. */
+    private void sweep() {
+        long now = System.currentTimeMillis();
+        for (Map.Entry<Location, Pending> entry : List.copyOf(pending.entrySet())) {
+            Location loc = entry.getKey();
+            Pending p = entry.getValue();
+            Player player = Bukkit.getPlayer(p.player());
+            // Distance before the block lookup, so a player who has walked away does not keep a far
+            // chunk loading every half second.
+            if (player == null
+                    || now > p.deadline()
+                    || !player.getWorld().equals(loc.getWorld())
+                    || player.getLocation().distanceSquared(loc.clone().add(0.5, 0.5, 0.5))
+                            > MAX_DISTANCE_SQUARED
+                    || loc.getBlock().getType() != Material.OAK_SIGN) {
+                abandon(loc, p);
+            }
+        }
+    }
+
     @EventHandler(priority = EventPriority.LOWEST)
     public void onSignChange(SignChangeEvent event) {
-        Pending p = pending.remove(event.getBlock().getLocation());
+        Location loc = event.getBlock().getLocation();
+        Pending p = pending.remove(loc);
         if (p == null) {
             return;
         }
         event.setCancelled(true);
         String input = PlainTextComponentSerializer.plainText().serialize(event.line(0)).trim();
-        Block block = event.getBlock();
         Bukkit.getScheduler().runTask(plugin, () -> {
-            block.setBlockData(p.original(), false);
+            restore(loc, p);
             Player player = Bukkit.getPlayer(p.player());
             if (player != null) {
                 p.callback().accept(input);
             }
         });
+    }
+
+    /**
+     * Another inventory opening replaces the sign editor on the client, and the answer it would have
+     * sent is gone. Abandoned a tick later, once that inventory is actually open, so the caller can
+     * see it.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onInventoryOpen(InventoryOpenEvent event) {
+        UUID id = event.getPlayer().getUniqueId();
+        for (Map.Entry<Location, Pending> entry : List.copyOf(pending.entrySet())) {
+            if (entry.getValue().player().equals(id)) {
+                Bukkit.getScheduler().runTask(plugin, () -> abandon(entry.getKey(), entry.getValue()));
+            }
+        }
     }
 
     /** Never leave a sign behind because someone logged out mid-prompt. */
@@ -135,10 +229,22 @@ public final class SignInput implements Listener {
         UUID id = event.getPlayer().getUniqueId();
         pending.entrySet().removeIf(entry -> {
             if (entry.getValue().player().equals(id)) {
-                entry.getKey().getBlock().setBlockData(entry.getValue().original(), false);
+                restore(entry.getKey(), entry.getValue());
                 return true;
             }
             return false;
         });
+    }
+
+    /**
+     * Take every open prompt's sign down. Called on disable: a stop or reload mid-prompt would
+     * otherwise leave the sign in the world for good, and the block it borrowed with it.
+     */
+    public void shutdown() {
+        for (Map.Entry<Location, Pending> entry : List.copyOf(pending.entrySet())) {
+            if (pending.remove(entry.getKey(), entry.getValue())) {
+                restore(entry.getKey(), entry.getValue());
+            }
+        }
     }
 }
