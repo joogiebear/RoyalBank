@@ -1,3 +1,8 @@
+## 2026.40.1 — 2026-10-03
+
+### 🐛 Fixes
+- keep synchronous=FULL for the money-handling store (`a57a360`)
+
 ## 2026.40.0 — 2026-10-03
 
 ### 🐛 Fixes
