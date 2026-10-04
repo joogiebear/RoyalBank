@@ -1,3 +1,9 @@
+## 2026.40.0 — 2026-10-03
+
+### 🐛 Fixes
+- apply every SQLite pragma, not just the first (`879674e`)
+- use the ISO week-year for release versions (`290a631`)
+
 ## 2026.39.1 — 2026-09-24
 
 ### 🐛 Fixes
