@@ -31,7 +31,9 @@ final class SqliteSettings {
     static Properties properties() {
         Properties props = new Properties();
         props.setProperty("journal_mode", "WAL");
-        props.setProperty("synchronous", "NORMAL");
+        // FULL, not NORMAL: with WAL, NORMAL can lose the last committed transactions on a power loss
+        // or OS crash. RoyalBank moves money, so it keeps the durable setting (also the driver default).
+        props.setProperty("synchronous", "FULL");
         props.setProperty("busy_timeout", String.valueOf(BUSY_TIMEOUT_MS));
         props.setProperty("foreign_keys", "true");
         return props;
