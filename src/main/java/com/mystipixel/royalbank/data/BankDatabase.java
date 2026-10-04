@@ -88,9 +88,10 @@ public final class BankDatabase {
                 hikari.setJdbcUrl("jdbc:sqlite:" + databaseFile.getAbsolutePath());
                 hikari.setDriverClassName("org.sqlite.JDBC");
                 // SQLite is single-writer: a pool of 1 avoids SQLITE_BUSY entirely.
-                hikari.setMaximumPoolSize(1);
-                hikari.setConnectionInitSql(
-                        "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;");
+                hikari.setMaximumPoolSize(SqliteSettings.POOL_SIZE);
+                // Driver properties, not connectionInitSql: sqlite-jdbc runs only the first statement
+                // of a multi-statement init string, so everything after journal_mode was dropped.
+                hikari.setDataSourceProperties(SqliteSettings.properties());
             }
 
             this.dataSource = new HikariDataSource(hikari);
