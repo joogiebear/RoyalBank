@@ -91,7 +91,7 @@ class SqliteSettingsTest {
 
     private static void assertAllPragmas(Statement st) throws Exception {
         assertEquals("wal", pragma(st, "journal_mode").toLowerCase());
-        assertEquals("1", pragma(st, "synchronous"), "synchronous NORMAL is 1");
+        assertEquals("2", pragma(st, "synchronous"), "synchronous FULL is 2");
         assertEquals(String.valueOf(SqliteSettings.BUSY_TIMEOUT_MS), pragma(st, "busy_timeout"));
         assertEquals("1", pragma(st, "foreign_keys"), "foreign_keys must be ON");
     }
