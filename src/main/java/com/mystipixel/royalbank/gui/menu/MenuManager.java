@@ -9,7 +9,7 @@ import java.util.Map;
 /** Loads (and, on first run, writes out) the bank's {@code gui/*.yml} menu templates. Reloadable. */
 public final class MenuManager {
 
-    /** Menu ids, matching the gui/<id>.yml file names and the {@code open_menu} effect's {@code menu} arg. */
+    // match the gui/<id>.yml file names and the open_menu effect's menu arg
     public static final String MAIN = "main";
     public static final String DEPOSIT = "deposit";
     public static final String WITHDRAW = "withdraw";

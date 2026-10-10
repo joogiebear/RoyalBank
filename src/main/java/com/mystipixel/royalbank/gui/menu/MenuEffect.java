@@ -8,8 +8,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * One entry in a {@code left-click:} / {@code right-click:} effect list, matching the EcoMenus shape
- * used across the Royal suite:
+ * One entry in a {@code left-click:} / {@code right-click:} effect list:
  * <pre>
  * - id: open_menu
  *   args:
@@ -35,7 +34,6 @@ public record MenuEffect(String id, Map<String, Object> args) {
         }
     }
 
-    /** Parse a YAML effect list (list of maps with id/args). */
     public static List<MenuEffect> parseList(List<Map<?, ?>> raw) {
         List<MenuEffect> out = new ArrayList<>();
         if (raw == null) {

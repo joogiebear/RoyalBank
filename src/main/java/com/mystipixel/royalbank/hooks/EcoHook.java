@@ -6,13 +6,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.inventory.ItemStack;
 
-/**
- * Optional item resolution via the eco platform, so eco item ids (e.g. {@code ecoitems:corrupt_soil})
- * can be shown as GUI icons — most notably the auto-generated upgrade-cost icons.
- *
- * <p>Every {@code com.willfp.*} type is only touched after the {@link #present} guard, so if eco is
- * absent the JVM never links it and this class degrades to vanilla-only.
- */
+// com.willfp.* types are only touched behind the `present` guard, so the class loads without eco
 public final class EcoHook {
 
     private final boolean present;
@@ -25,10 +19,7 @@ public final class EcoHook {
         return present;
     }
 
-    /**
-     * Resolve an id to a display {@link ItemStack}, or {@code null} if it can't be resolved. Vanilla ids
-     * (bare or {@code minecraft:}) go straight to Bukkit; custom namespaces resolve through eco.
-     */
+    /** {@code null} if the id can't be resolved. Vanilla ids (bare or {@code minecraft:}) skip eco. */
     public ItemStack resolve(String id, int amount) {
         if (id == null) {
             return null;
@@ -48,14 +39,13 @@ public final class EcoHook {
                         return item;
                     }
                 } catch (Throwable ignored) {
-                    // try the next candidate form
                 }
             }
         }
         return null;
     }
 
-    /** eco config ids vary (ecoitems: vs ecoitem: vs the bare id); try the common forms. */
+    // eco config ids vary: ecoitems:, ecoitem: or the bare id
     private static String[] lookupCandidates(String id) {
         int colon = id.indexOf(':');
         if (colon < 0) {
@@ -70,7 +60,7 @@ public final class EcoHook {
         if (id.contains(":")) {
             String ns = id.substring(0, id.indexOf(':'));
             if (!ns.equalsIgnoreCase("minecraft")) {
-                return null; // custom namespace — resolve via eco
+                return null; // custom namespace, resolved via eco
             }
             raw = id.substring(id.indexOf(':') + 1);
         }

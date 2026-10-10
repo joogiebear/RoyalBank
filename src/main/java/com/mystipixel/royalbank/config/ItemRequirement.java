@@ -16,7 +16,7 @@ public record ItemRequirement(
         return amount + "x " + prettify(base);
     }
 
-    /** Turn a namespaced id or enum name (e.g. "ecoitems:enchanted_gold_block", "GOLD_BLOCK") into title case. */
+    // "ecoitems:enchanted_gold_block" or "GOLD_BLOCK" to title case
     private static String prettify(String raw) {
         if (raw == null || raw.isBlank()) {
             return "Item";

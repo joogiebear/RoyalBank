@@ -38,7 +38,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     private final LevelManager levelManager;
     private final BankGui bankGui;
 
-    /** Large transfers awaiting a /bank transfer confirm, keyed by sender. Expired entries are ignored. */
+    // keyed by sender; expired entries are ignored
     private final Map<UUID, PendingTransfer> pendingTransfers = new ConcurrentHashMap<>();
 
     private record PendingTransfer(UUID recipient, double amount, long createdAt) {
@@ -163,7 +163,6 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             msg(player, "permission.transfer", "&cYou do not have permission to transfer money.");
             return;
         }
-        // /bank transfer confirm | cancel — act on a pending large transfer.
         if (args.length == 2 && args[1].equalsIgnoreCase("confirm")) {
             confirmTransfer(player);
             return;
@@ -191,7 +190,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             return;
         }
 
-        // Large transfers require confirmation so a fat-fingered amount (e.g. 5b instead of 5m) is caught.
+        // catches a fat-fingered amount (5b instead of 5m)
         double threshold = plugin.getConfig().getDouble("settings.transfer.confirm-threshold", 100_000_000.0);
         if (threshold > 0 && amount >= threshold) {
             pendingTransfers.put(player.getUniqueId(), new PendingTransfer(target.getUniqueId(), amount, System.currentTimeMillis()));
@@ -213,7 +212,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             send(player, "&cThat transfer expired. Please run it again.");
             return;
         }
-        // Re-run through the full transfer path so balance/cap are re-validated at confirm time.
+        // full transfer path again so balance and cap are re-validated at confirm time
         sendResult(player, bankService.transfer(player, Bukkit.getOfflinePlayer(pending.recipient()), pending.amount()));
     }
 
@@ -350,7 +349,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         }
 
         File backupFile = new File(backupFolder, "bank-" + BACKUP_TIME.format(Instant.now()) + "-" + System.currentTimeMillis() + ".db");
-        // VACUUM INTO can take a moment on a large database, so run it off the main thread.
+        // VACUUM INTO can take a while on a large database
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             boolean ok = plugin.getDatabase().backupTo(backupFile.toPath());
             Bukkit.getScheduler().runTask(plugin, () -> {

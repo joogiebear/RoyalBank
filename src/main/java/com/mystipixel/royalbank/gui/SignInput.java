@@ -26,29 +26,17 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
 /**
- * Sign-based text entry, ported from RoyalTrade (the suite's shared pattern — the bazaar uses it
- * too): a throwaway sign is placed at the player's feet, opened with Paper's {@code openSign}, and
- * the top line read back through {@link SignChangeEvent}. The original block is always put back.
- *
- * <p>Only official Paper API, no NMS or packets, so it survives version changes.
- *
- * <p>The callback runs on the main thread, exactly once per prompt that opened, and receives the
- * typed text, or {@code null} if no answer is coming: the sign could not be placed, or the prompt was
- * abandoned. Callers need that to put the player back where they were rather than leave them staring
- * at nothing.
- *
- * <p>A prompt is abandoned when its answer can no longer arrive: it timed out, the player moved out of
- * the server's sign-edit range or changed world, the sign was broken, or another inventory replaced
- * the editor on their screen. Without that, one lost answer strands the caller's state for good and
- * leaves the sign in the world.
+ * Text entry on a throwaway sign at the player's feet (Paper {@code openSign}, no NMS); the original
+ * block is always put back. The callback runs on the main thread exactly once per opened prompt, with
+ * the typed text or {@code null} when no answer is coming: the sign could not be placed, or the prompt
+ * was abandoned (timeout, out of sign-edit range, world change, sign broken, another inventory opened).
  */
 public final class SignInput implements Listener {
 
     private static final LegacyComponentSerializer AMP = LegacyComponentSerializer.legacyAmpersand();
 
-    /** How long a prompt may stay open before it is treated as abandoned. */
     private static final long TIMEOUT_MILLIS = 60_000L;
-    /** Past roughly this distance the server discards the sign's update, so no answer can come. */
+    // past roughly this distance the server discards the sign's update
     private static final double MAX_DISTANCE_SQUARED = 8.0 * 8.0;
 
     private record Pending(UUID player, BlockData original, Consumer<String> callback, long deadline) {
@@ -62,18 +50,16 @@ public final class SignInput implements Listener {
         Bukkit.getScheduler().runTaskTimer(plugin, this::sweep, 10L, 10L);
     }
 
-    /** Open a sign editor. {@code hints} fill lines 2-4; line 1 is what the player types. */
+    /** {@code hints} fill lines 2-4; line 1 is what the player types. */
     public void request(Player player, List<String> hints, Consumer<String> callback) {
-        // A new prompt supersedes an old one. Its sign still has to come down, or the old spot is
-        // left as a permanent oak sign with the block it borrowed gone.
+        // a new prompt supersedes an old one, whose sign still has to come down
         for (Map.Entry<Location, Pending> entry : List.copyOf(pending.entrySet())) {
             if (entry.getValue().player().equals(player.getUniqueId())
                     && pending.remove(entry.getKey(), entry.getValue())) {
                 restore(entry.getKey(), entry.getValue());
             }
         }
-        // Opening a sign editor while a chest inventory is open is unreliable, so close first and
-        // open the sign a tick later.
+        // opening a sign editor over a chest inventory is unreliable: close first, open next tick
         player.closeInventory();
         Bukkit.getScheduler().runTask(plugin, () -> openNow(player, hints, callback));
     }
@@ -105,13 +91,8 @@ public final class SignInput implements Listener {
         player.openSign(sign, Side.FRONT);
     }
 
-    /**
-     * Where to put the throwaway sign: the player's feet, else the block at their head. Putting the
-     * original back only restores block data, not a block entity's contents, so a block with one (a
-     * sign's text, a banner's patterns) is never borrowed. Nor is a block another player's prompt is
-     * already using, since its "original" would then be that prompt's sign. Air is preferred, so
-     * nothing visible changes. {@code null} if neither spot will do.
-     */
+    // Feet, else head; air preferred. Never a block entity (restore only puts back block data) or a
+    // block another prompt is already using (its "original" would be that prompt's sign).
     private Block signSpot(Player player) {
         Block feet = player.getLocation().getBlock();
         Block head = feet.getRelative(org.bukkit.block.BlockFace.UP);
@@ -133,11 +114,7 @@ public final class SignInput implements Listener {
         return fallback;
     }
 
-    /**
-     * Put the borrowed block back — but only over our own sign, or the air left where it was broken.
-     * Anything else there was placed since, and overwriting it would destroy it (a container's
-     * contents with it, since block data carries none).
-     */
+    // only over our own sign or air: anything else was placed since and would be destroyed
     private static void restore(Location loc, Pending p) {
         Block block = loc.getBlock();
         Material now = block.getType();
@@ -146,39 +123,35 @@ public final class SignInput implements Listener {
         }
     }
 
-    /** Give up on a prompt: take the sign down and tell the caller no answer is coming. */
     private void abandon(Location loc, Pending p) {
         if (!pending.remove(loc, p)) {
-            return;                                  // answered or cleaned up in the meantime
+            return;                                  // answered or cleaned up meanwhile
         }
         restore(loc, p);
         Player player = Bukkit.getPlayer(p.player());
         if (player == null) {
             return;
         }
-        // Close a sign editor that may still be on screen (a timeout), but not another plugin's menu
-        // that replaced it — the caller decides what to do about that.
+        // close a sign editor still on screen (timeout), but not another plugin's menu that replaced it
         if (showingOwnInventory(player)) {
             player.closeInventory();
         }
         p.callback().accept(null);
     }
 
-    /** True when nothing but the player's own inventory is open, i.e. no other menu is on screen. */
+    /** True when no menu other than the player's own inventory is open. */
     public static boolean showingOwnInventory(Player player) {
         InventoryType type = player.getOpenInventory().getTopInventory().getType();
         return type == InventoryType.CRAFTING || type == InventoryType.CREATIVE;
     }
 
-    /** Abandon every prompt whose answer can no longer arrive. */
     private void sweep() {
         long now = System.currentTimeMillis();
         for (Map.Entry<Location, Pending> entry : List.copyOf(pending.entrySet())) {
             Location loc = entry.getKey();
             Pending p = entry.getValue();
             Player player = Bukkit.getPlayer(p.player());
-            // Distance before the block lookup, so a player who has walked away does not keep a far
-            // chunk loading every half second.
+            // distance before the block lookup, so a far chunk isn't loaded every half second
             if (player == null
                     || now > p.deadline()
                     || !player.getWorld().equals(loc.getWorld())
@@ -208,11 +181,8 @@ public final class SignInput implements Listener {
         });
     }
 
-    /**
-     * Another inventory opening replaces the sign editor on the client, and the answer it would have
-     * sent is gone. Abandoned a tick later, once that inventory is actually open, so the caller can
-     * see it.
-     */
+    // another inventory replaces the sign editor client-side; abandon next tick, once it is open,
+    // so the caller can see it
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onInventoryOpen(InventoryOpenEvent event) {
         UUID id = event.getPlayer().getUniqueId();
@@ -223,7 +193,6 @@ public final class SignInput implements Listener {
         }
     }
 
-    /** Never leave a sign behind because someone logged out mid-prompt. */
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
         UUID id = event.getPlayer().getUniqueId();
@@ -236,10 +205,7 @@ public final class SignInput implements Listener {
         });
     }
 
-    /**
-     * Take every open prompt's sign down. Called on disable: a stop or reload mid-prompt would
-     * otherwise leave the sign in the world for good, and the block it borrowed with it.
-     */
+    /** Call on disable, or a stop mid-prompt leaves the sign in the world. */
     public void shutdown() {
         for (Map.Entry<Location, Pending> entry : List.copyOf(pending.entrySet())) {
             if (pending.remove(entry.getKey(), entry.getValue())) {

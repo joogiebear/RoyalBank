@@ -17,12 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Reads every setting back off a real connection. The old multi-statement {@code connectionInitSql}
- * string looked right and applied only its first PRAGMA: journal mode became WAL, while synchronous,
- * busy_timeout and foreign_keys silently kept the driver's defaults (FULL, 3000 ms, OFF). Nothing
- * ever read them back, which is why it went unnoticed. These assertions are that read-back.
- */
+// reads every setting back off a real connection
 class SqliteSettingsTest {
 
     @TempDir
@@ -70,13 +65,8 @@ class SqliteSettingsTest {
         }
     }
 
-    /**
-     * Pins the driver behaviour this class exists to work around, using the exact string
-     * {@link BankDatabase} used to hand to {@code connectionInitSql} and the exact JDBC call
-     * HikariCP makes with it ({@code Statement#execute}, which prepares only the first statement —
-     * {@code executeUpdate} would have run them all). If a future sqlite-jdbc runs the whole string,
-     * this turns red and the choice can be revisited; until then it documents the bug.
-     */
+    // Pins the driver behaviour SqliteSettings works around, with the JDBC call HikariCP makes for
+    // connectionInitSql (Statement#execute). If this turns red, sqlite-jdbc now runs the whole string.
     @Test
     @DisplayName("the old multi-statement init string stops after its first pragma")
     void multiStatementInitSqlStopsAfterTheFirstPragma() throws Exception {

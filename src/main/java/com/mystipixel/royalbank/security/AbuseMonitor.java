@@ -19,14 +19,8 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * RMT / laundering detection for money entering and leaving the bank.
- *
- * It cannot see purse-to-purse transfers (handle those in your economy plugin), but it watches the
- * bank for two strong signals: unusually large single transactions / balances, and abnormally fast
- * balance growth (money being parked). Alerts go to the console, online staff (royalbank.alerts),
- * and an optional Discord webhook. Velocity hits are recorded as flags for later review.
- *
- * All record/flag access happens on the main server thread; only the webhook POST runs async.
+ * Flags large bank transactions or balances and fast balance growth (parking). Purse-to-purse
+ * transfers are not visible here. Main thread only; just the webhook POST runs async.
  */
 public final class AbuseMonitor {
     public record Flag(UUID uuid, String username, String reason, long timestamp) {

@@ -1,5 +1,5 @@
-# Shared accounts: group/coop balances owned by an id rather than a player, used via the RoyalBankAPI
-# (e.g. RoyalSkyblock coop banks). Independent of personal accounts — no levels or interest.
+# Shared accounts: coop balances owned by an id rather than a player, used through the RoyalBankAPI
+# (e.g. RoyalSkyblock coop banks).
 shared-accounts:
   # Maximum a single shared account can hold. -1 = unlimited.
   max-balance: -1.0
@@ -13,34 +13,26 @@ settings:
   interest-cooldown-hours: 31
   pay-interest-to-bank: true
   upgrade-unlock-combined-balance: 10000000.0
-  # First-deposit bonus is paid once per account (tracked persistently), the first time a player
-  # deposits. It is no longer re-granted by emptying and re-depositing.
+  # Paid once per account, on the first deposit.
   first-deposit-bonus:
     enabled: true
     amount: 10.0
-  # Per-claim interest ceiling. Interest frequency is governed by interest-cooldown-hours,
-  # so the effective payout per cooldown period is capped at this amount.
-  # Set amount to a negative number for no global cap.
+  # Cap on each interest claim (one per interest-cooldown-hours). Negative amount = no global cap.
   max-daily-interest:
     enabled: true
     amount: 1500000.0
-  # GUI "custom amount" entry happens on a throwaway sign (like the rest of the suite),
-  # so amounts never appear in public chat and there is no capture window to time out.
   messages-prefix: "&6&lRoyalBank &8» &r"
   amount-limits:
     min-transaction: 0.01
     max-transaction: 1000000000000.0
     decimal-places: 2
-  # Transfers at or above confirm-threshold require a second step (/bank transfer confirm),
-  # guarding against fat-fingered amounts like typing 5b instead of 5m. Set confirm-threshold
-  # to 0 to never require confirmation. The pending transfer expires after confirm-timeout-seconds.
+  # Transfers at or above confirm-threshold need /bank transfer confirm within confirm-timeout-seconds.
+  # 0 = never ask.
   transfer:
     confirm-threshold: 100000000.0
     confirm-timeout-seconds: 30
-    # Playtime floor for bank transfers, in hours; both sender and recipient must clear it.
-    # This is the same lever RoyalTrade's min-playtime-hours pulls, and it matters that they
-    # match: gate trades but not transfers and the bank is simply the detour RMT alts take.
-    # 0 disables the gate (the default, matching RoyalTrade's default).
+    # Hours of playtime both sender and recipient need. Keep it equal to RoyalTrade's
+    # min-playtime-hours, or RMT alts just move money through the bank. 0 = off.
     min-playtime-hours: 0.0
 
 transactions:
@@ -60,10 +52,8 @@ storage:
     properties: "useSSL=false&allowPublicKeyRetrieval=true"
     pool-size: 10
 
-# Anti-abuse / RMT detection. RoyalBank watches money entering and leaving the bank; it cannot see
-# purse-to-purse transfers (handle those in your economy plugin), but large deposits and rapid balance
-# growth are strong signals of laundering or coins being sold for real money. Alerts go to the console,
-# to online staff with the royalbank.alerts permission, and (optionally) to a Discord webhook.
+# Anti-abuse: flags large bank transactions and fast balance growth (purse-to-purse transfers are not
+# visible here). Alerts go to the console, staff with royalbank.alerts, and an optional Discord webhook.
 anti-abuse:
   # Warn when a single deposit/withdraw is very large, or when a balance first crosses a ceiling.
   large-transaction-alerts:
@@ -80,15 +70,10 @@ anti-abuse:
   # Optional Discord webhook URL for alerts and flags. Leave blank to disable.
   discord-webhook: ""
 
-# RoyalBank account progression.
-# Interest is calculated in tranches/brackets, then capped by max-interest.
-# Notes:
-# - max-interest: per-level interest cap. Use 0 to disable interest for a tier, or a negative
-#   number for no per-level cap.
-# - daily-interest-percent: only used as a flat fallback when a level has NO interest-tranches
-#   block. When interest-tranches are defined (as below), this value is ignored.
-# - For best results, make the top tranche's "to" reach the level's max-balance so high balances
-#   keep earning up to the interest cap.
+# Account levels. Interest is calculated per tranche, then capped by max-interest.
+# - max-interest: 0 = no interest for the tier, negative = no per-level cap.
+# - daily-interest-percent: flat fallback, ignored when interest-tranches are defined.
+# - Let the top tranche's "to" reach max-balance so high balances keep earning up to the cap.
 levels:
   1:
     name: "Starter Account"

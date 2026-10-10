@@ -6,25 +6,14 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Public API registered with Bukkit's {@code ServicesManager} so other plugins can soft-depend on
- * RoyalBank and drive two things beyond a personal player account:
+ * Registered with Bukkit's {@code ServicesManager}. {@link #exportAccount}/{@link #importAccount}/
+ * {@link #resetAccount} swap a player's own account per profile; the {@code account*} methods run a
+ * full bank on an arbitrary account id (e.g. a skyblock coop), with a member as the Vault counterparty.
  *
- * <ol>
- *   <li><b>Per-profile personal banks</b> — {@link #exportAccount}/{@link #importAccount}/
- *       {@link #resetAccount} let a caller (e.g. RoyalSkyblock) swap a player's own account row on a
- *       profile switch, so the personal bank is per-profile while native {@code /bank} keeps working.</li>
- *   <li><b>Id-keyed shared accounts</b> (e.g. a skyblock coop) — the {@code account*} methods run the
- *       full bank (balance, level, upgrades, ledger) on an arbitrary account id, with a member as the
- *       Vault/inventory counterparty.</li>
- * </ol>
- *
- * <p>Money always moves through Vault, so the server economy total is conserved. Main-thread only.
- * {@code account*}/{@code personal} deposit-style methods return {@code null} on success or a
- * colour-coded, player-facing error string.
+ * <p>Main-thread only. Deposit-style methods return {@code null} on success or a colour-coded,
+ * player-facing error string.
  */
 public interface RoyalBankAPI {
-
-    // ── per-profile personal bank (operates the player's own account row) ──────────
 
     /** Copy a player's current account state (creating a fresh one if absent). */
     BankSnapshot exportAccount(UUID playerId);
@@ -34,8 +23,6 @@ public interface RoyalBankAPI {
 
     /** Reset a player's account to a fresh starting account (new profile). */
     void resetAccount(UUID playerId);
-
-    // ── id-keyed accounts (shared / coop) ──────────────────────────────────────────
 
     double getAccountBalance(UUID accountId);
 

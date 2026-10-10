@@ -39,13 +39,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-/**
- * The bank menus, rendered from EcoMenus-dialect {@code gui/*.yml} templates via the shared
- * {@link MenuManager}/{@link MenuTemplate} engine (consistent with RoyalAuctions/RoyalBazaar). Clicks
- * run the slot's {@code left-click}/{@code right-click} effect list; this class dispatches those bank
- * effects (open_menu, deposit, withdraw, upgrade, confirm_upgrade, claim_interest, close_inventory,
- * play_sound) and owns the chat "custom amount" flow.
- */
+// Effects dispatched here: open_menu, deposit, withdraw, upgrade, confirm_upgrade, claim_interest,
+// close_inventory, play_sound.
 public final class BankGui implements Listener {
 
     private static final DateTimeFormatter TIME_FORMAT =
@@ -68,8 +63,6 @@ public final class BankGui implements Listener {
     public void reload() {
         menus.reload();
     }
-
-    // ------------------------------------------------------------------ opening
 
     public void openMain(Player player) {
         open(player, MenuManager.MAIN);
@@ -137,7 +130,6 @@ public final class BankGui implements Listener {
         }
     }
 
-    /** Fill the confirm-upgrade content slots with an icon per required item, auto-generated from the tier. */
     private void fillUpgradeCosts(Player player, Inventory inventory, MenuTemplate template) {
         List<Integer> slots = template.contentSlots();
         if (slots.isEmpty()) {
@@ -149,7 +141,6 @@ public final class BankGui implements Listener {
         }
     }
 
-    /** The real (eco-resolved) item for a requirement, with have/need counts appended to its lore. */
     private ItemStack costIcon(Player player, ItemRequirement requirement) {
         String id = requirement.type() == RequirementType.VANILLA
                 ? requirement.material().name()
@@ -167,7 +158,7 @@ public final class BankGui implements Listener {
         ItemMeta meta = icon.getItemMeta();
         if (meta != null) {
             List<Component> lore = meta.hasLore() ? new ArrayList<>(meta.lore()) : new ArrayList<>();
-            // Couldn't resolve a custom item — name the icon with its id so a wrong/not-yet-created id is obvious.
+            // show the raw id so a wrong or not-yet-created id is obvious
             if (!resolved && requirement.type() == RequirementType.ECOITEMS) {
                 meta.displayName(Text.item("&f" + requirement.customItemId()));
                 lore.add(Text.item("&8(not loaded in eco)"));
@@ -181,8 +172,6 @@ public final class BankGui implements Listener {
         return icon;
     }
 
-    // ------------------------------------------------------------------ interaction
-
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onInventoryClick(InventoryClickEvent event) {
         if (!(event.getWhoClicked() instanceof Player player)) {
@@ -191,7 +180,7 @@ public final class BankGui implements Listener {
         if (!(event.getInventory().getHolder() instanceof BankHolder holder)) {
             return;
         }
-        event.setCancelled(true); // bank menus are read-only surfaces; nothing can be moved
+        event.setCancelled(true);
 
         MenuTemplate template = menus.get(holder.menuId());
         if (template == null) {
@@ -199,11 +188,11 @@ public final class BankGui implements Listener {
         }
         int raw = event.getRawSlot();
         if (raw < 0 || raw >= template.size()) {
-            return; // a click in the player's own inventory
+            return;
         }
         MenuSlot slot = template.slotAt(raw);
         if (slot == null) {
-            return; // filler or a content (transaction) slot
+            return;
         }
         List<MenuEffect> effects = event.isRightClick() && !slot.rightClick().isEmpty()
                 ? slot.rightClick() : slot.leftClick();
@@ -284,11 +273,6 @@ public final class BankGui implements Listener {
         runAndRefresh(player, menuId, bankService.withdraw(player, amount));
     }
 
-    /**
-     * Ask for a custom amount on a throwaway sign — the suite's shared input (RoyalTrade,
-     * RoyalBazaar, RoyalAuctions all use it). The amount stays out of public chat, there is no
-     * timed capture window to reason about, and the callback arrives on the main thread.
-     */
     private void promptForAmount(Player player, String menuId, PendingAmount.Kind kind) {
         playSound(menus.get(menuId), player, "sounds.prompt");
         boolean deposit = kind == PendingAmount.Kind.DEPOSIT;
@@ -296,8 +280,7 @@ public final class BankGui implements Listener {
                 List.of("&8^^^^^^^^^^^^^^^", deposit ? "&8Amount to deposit" : "&8Amount to withdraw",
                         "&8(or 'cancel')"),
                 typed -> {
-                    // Another plugin's menu displaced the prompt. Reopening the bank over it would
-                    // yank the player out of whatever they just opened, so let it go.
+                    // another plugin's menu replaced the prompt; don't reopen the bank over it
                     if (typed == null && !SignInput.showingOwnInventory(player)) {
                         return;
                     }
@@ -335,10 +318,8 @@ public final class BankGui implements Listener {
 
     @EventHandler
     public void onInventoryClose(InventoryCloseEvent event) {
-        // Nothing to track on close; the bank menus are stateless per-open.
+        // bank menus are stateless per open
     }
-
-    // ------------------------------------------------------------------ helpers
 
     private boolean requirePermission(Player player, String menuId, String permission, String messageKey, String fallback) {
         if (player.hasPermission(permission)) {
@@ -358,7 +339,7 @@ public final class BankGui implements Listener {
         Bukkit.getScheduler().runTask(plugin, () -> openMain(player));
     }
 
-    /** Expand a lore list, turning a {@code %upgrade_info%} line into one line per upgrade-description line. */
+    // a %upgrade_info% line becomes one line per upgrade-description line
     private List<String> expandLore(Player player, List<String> lore) {
         List<String> out = new ArrayList<>();
         for (String line : lore) {
@@ -473,7 +454,6 @@ public final class BankGui implements Listener {
         plugin.getMessageManager().send(player, key, fallback);
     }
 
-    /** Which direction a custom-amount prompt moves money. */
     private static final class PendingAmount {
         enum Kind { DEPOSIT, WITHDRAW }
 

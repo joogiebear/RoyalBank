@@ -1,6 +1,6 @@
 # RoyalBank - upgrade confirmation. See main.yml for the effect + placeholder reference.
-# The mask '0' slots (row 2) are filled automatically with an icon per required item — the real
-# item (eco items resolved via eco), with live "have / need" counts in the lore. No manual editing.
+# The mask '0' slots (row 2) are filled automatically with an icon per required item, with live
+# "have / need" counts in the lore.
 title: "&8Bank &7» &fConfirm Upgrade"
 rows: 4
 

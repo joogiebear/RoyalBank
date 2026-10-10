@@ -48,9 +48,7 @@ public final class Amounts {
             return null;
         }
 
-        // Optional magnitude suffix so players can type shorthand for large sums:
-        // k = thousand, m = million, b = billion, t = trillion (case-insensitive).
-        // e.g. "5m" -> 5,000,000, "1.5b" -> 1,500,000,000. Amounts below 1,000 need no suffix.
+        // optional suffix, case-insensitive: k, m, b, t (thousand to trillion), e.g. "1.5b" -> 1,500,000,000
         double multiplier = 1.0;
         char last = Character.toLowerCase(normalized.charAt(normalized.length() - 1));
         if (last == 'k' || last == 'm' || last == 'b' || last == 't') {
