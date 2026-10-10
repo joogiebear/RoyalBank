@@ -12,14 +12,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * A single bank menu loaded from a {@code gui/*.yml} file in the EcoMenus dialect shared with the rest
- * of the Royal suite: {@code title}, {@code rows}, a page {@code mask} (filler pattern where {@code 0}
- * marks dynamic-content slots, e.g. the transaction list), and fixed {@code slots} — each with a
- * {@code location: {row, column}} (1-based), an inline {@code item} spec, {@code lore}, and
- * {@code left-click}/{@code right-click} effect lists.
- *
- * <p>A slot may also carry a semantic {@code id} plus a {@code locked-item}/{@code locked-lore}
- * alternate appearance (used by the upgrade button before it is unlocked).
+ * A {@code gui/*.yml} menu in the EcoMenus dialect: {@code title}, {@code rows}, a {@code mask} where
+ * {@code 0} marks dynamic-content slots, and fixed {@code slots} with 1-based {@code row}/{@code column}.
  */
 public final class MenuTemplate {
 
@@ -28,7 +22,7 @@ public final class MenuTemplate {
     private final ItemStack maskFiller;        // null when no mask / all-content
     private final List<Integer> contentSlots;  // indices marked 0 in the mask
     private final List<MenuSlot> slots;
-    private final FileConfiguration source;    // retained for the bank-specific `sounds:` block
+    private final FileConfiguration source;    // for the bank-specific `sounds:` block
 
     private MenuTemplate(String title, int rows, ItemStack maskFiller, List<Integer> contentSlots,
                          List<MenuSlot> slots, FileConfiguration source) {
@@ -40,7 +34,6 @@ public final class MenuTemplate {
         this.source = source;
     }
 
-    /** The raw menu config, for bank-specific extras (e.g. the {@code sounds:} section). */
     public FileConfiguration config() {
         return source;
     }
@@ -51,7 +44,6 @@ public final class MenuTemplate {
         int rows = Math.max(1, Math.min(6, cfg.getInt("rows", defaultRows)));
         int size = rows * 9;
 
-        // --- mask (filler + content slots) ---
         ItemStack filler = null;
         List<Integer> contentSlots = new ArrayList<>();
         ConfigurationSection mask = firstPageMask(cfg);
@@ -71,7 +63,6 @@ public final class MenuTemplate {
             }
         }
 
-        // --- fixed slots ---
         List<MenuSlot> slots = new ArrayList<>();
         for (Map<?, ?> raw : cfg.getMapList("slots")) {
             MenuSlot slot = parseSlot(raw, size);
@@ -121,11 +112,7 @@ public final class MenuTemplate {
                 MenuEffect.parseList(castMapList(raw.get("right-click"))));
     }
 
-    /**
-     * Resolve a slot's 1-based {@code row}/{@code column} into a 0-based inventory index. Row/column sit
-     * directly on the slot (the eco-menus convention); a legacy nested {@code location: {row, column}}
-     * is still accepted as a fallback.
-     */
+    // row/column on the slot itself; a legacy nested location: {row, column} is still accepted
     private static int slotIndex(Map<?, ?> raw, int size) {
         Object rowObj = raw.get("row");
         Object colObj = raw.get("column");
@@ -142,8 +129,6 @@ public final class MenuTemplate {
         int index = (intOf(rowObj, 1) - 1) * 9 + (intOf(colObj, 1) - 1);
         return index >= 0 && index < size ? index : -1;
     }
-
-    // ------------------------------------------------------------------ accessors / rendering
 
     public String title() {
         return title;
@@ -170,7 +155,6 @@ public final class MenuTemplate {
         return null;
     }
 
-    /** Paint the mask filler across every non-content slot. */
     public void applyFiller(Inventory inv) {
         if (maskFiller == null) {
             return;
@@ -181,8 +165,6 @@ public final class MenuTemplate {
             }
         }
     }
-
-    // ------------------------------------------------------------------ helpers
 
     private static List<String> stringList(Object o) {
         List<String> out = new ArrayList<>();

@@ -15,8 +15,7 @@ import java.util.Optional;
 
 public final class LevelManager {
     private final JavaPlugin plugin;
-    // Published as an immutable snapshot swapped atomically on reload, so async readers (e.g. the
-    // PlaceholderAPI expansion) never observe a half-rebuilt map.
+    // immutable snapshot swapped on reload, so async readers (PlaceholderAPI) never see a half-built map
     private volatile Map<Integer, BankLevel> levels = Collections.emptyMap();
 
     public LevelManager(JavaPlugin plugin) {
@@ -70,8 +69,7 @@ public final class LevelManager {
             if (fallbackInterestPercent <= 0.0) {
                 return Collections.emptyList();
             }
-            // Bound the implicit single tranche by the level's max-balance so the fallback path behaves
-            // consistently with explicit tranches (no interest computed on balance the account can't hold).
+            // bounded by max-balance like explicit tranches, so no interest on balance the account can't hold
             double upper = maxBalance > 0.0 ? maxBalance : Double.MAX_VALUE;
             return List.of(new InterestTranche(0.0, upper, fallbackInterestPercent));
         }

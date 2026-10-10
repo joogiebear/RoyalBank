@@ -22,7 +22,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 public final class RoyalBankPlugin extends JavaPlugin {
 
-    /** bStats project id. Identifies the plugin, not the server, so it is fixed rather than configurable. */
+    // identifies the plugin, not the server, so it is fixed rather than configurable
     private static final int BSTATS_PLUGIN_ID = 31375;
     private VaultHook vaultHook;
     private BankDatabase database;
@@ -57,21 +57,19 @@ public final class RoyalBankPlugin extends JavaPlugin {
             return;
         }
 
-        // Vault is a hard dependency, but the economy *provider* (EssentialsX, CMI, an EcoBits currency
-        // with vault:true, etc.) can register slightly after we enable. Try now; if it isn't ready yet,
-        // wait for it to register instead of disabling outright.
+        // the economy provider (EssentialsX, CMI, an EcoBits currency) can register after we enable,
+        // so wait for it instead of disabling
         if (vaultHook.setupEconomy()) {
             finishEnable();
         } else {
             getLogger().warning("No Vault economy provider found yet. RoyalBank is waiting for one to register"
                     + " (install an economy plugin, or enable vault:true on a currency). /bank is unavailable until then.");
             getServer().getPluginManager().registerEvents(new EconomyWaiter(), this);
-            // Fallback in case the provider registered before our listener was active.
+            // in case the provider registered before our listener was active
             getServer().getScheduler().runTaskLater(this, this::tryLateEnable, 100L);
         }
     }
 
-    /** Completes startup once a Vault economy provider is available. Idempotent. */
     private void finishEnable() {
         if (fullyEnabled) {
             return;
@@ -80,7 +78,6 @@ public final class RoyalBankPlugin extends JavaPlugin {
 
         this.bankService = new BankService(this, database, levelManager, vaultHook);
         database.migrateSharedAccountsToPlayerBanks(levelManager.getStartingLevel());
-        // Expose the shared-account API so other plugins (e.g. RoyalSkyblock coop banks) can soft-depend on it.
         getServer().getServicesManager().register(
                 com.mystipixel.royalbank.api.RoyalBankAPI.class, bankService, this,
                 org.bukkit.plugin.ServicePriority.Normal);
@@ -103,7 +100,7 @@ public final class RoyalBankPlugin extends JavaPlugin {
         setupPlaceholders();
         setupMetrics();
 
-        // Cache any players already online (covers a live plugin reload, not just a fresh start).
+        // players already online after a live reload
         for (Player player : getServer().getOnlinePlayers()) {
             bankService.loadAccount(player);
         }
@@ -123,7 +120,6 @@ public final class RoyalBankPlugin extends JavaPlugin {
         }
     }
 
-    /** Listens for an economy provider registering after we enabled, then completes startup once. */
     private final class EconomyWaiter implements Listener {
         @EventHandler
         public void onServiceRegister(ServiceRegisterEvent event) {
@@ -163,11 +159,7 @@ public final class RoyalBankPlugin extends JavaPlugin {
         }
     }
 
-    /**
-     * If the EconGuard core is installed, report bank activity to it instead of the built-in monitor.
-     * The EconGuard-referencing class is only loaded inside this guard, so RoyalBank still runs fine
-     * (with its built-in anti-abuse) when EconGuard is absent.
-     */
+    // EconGuardAuditSink is only loaded inside this guard, so RoyalBank runs without EconGuard
     private void setupAuditSink() {
         if (getServer().getPluginManager().getPlugin("EconGuard") == null) {
             return;
@@ -226,7 +218,7 @@ public final class RoyalBankPlugin extends JavaPlugin {
             return;
         }
         int maxPerPlayer = getConfig().getInt("transactions.max-per-player", 100);
-        // Runs on a dedicated connection off the main thread so the full-table scan never stalls the server.
+        // async: the full-table scan would stall the server
         getServer().getScheduler().runTaskAsynchronously(this, () -> {
             int removed = database.pruneTransactions(maxPerPlayer);
             if (removed > 0) {

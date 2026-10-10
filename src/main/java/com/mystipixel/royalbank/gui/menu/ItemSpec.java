@@ -16,17 +16,11 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Parses the EcoMenus inline item syntax used across the Royal suite, e.g.
- * <pre>gold_block hide_attributes name:"&6Bank Upgrades"</pre>
- * The first token is an item lookup — a vanilla {@link Material}, or an {@code ecoitems:...} id resolved
- * through eco when it's installed. The rest are flags ({@code hide_enchants}, {@code hide_attributes})
- * and {@code key:"value"} modifiers.
- *
- * <p>Player heads follow the eco convention:
- * <pre>player_head texture:&lt;base64&gt;      # a custom head from a base64 texture value
- * player_head head:&lt;player&gt;             # a specific player's head (e.g. head:%player%)</pre>
- *
- * <p>Names/lore/head-owner may contain {@code %placeholders%}, filled at render time via {@link #build}.
+ * EcoMenus inline item syntax: a vanilla material or {@code ecoitems:} id, then flags
+ * ({@code hide_enchants}, {@code hide_attributes}) and {@code key:"value"} modifiers.
+ * <pre>gold_block hide_attributes name:"&6Bank Upgrades"
+ * player_head texture:&lt;base64&gt;
+ * player_head head:%player%</pre>
  */
 public final class ItemSpec {
 
@@ -75,12 +69,11 @@ public final class ItemSpec {
         return new ItemSpec(lookup, name, texture, head, hideEnch, hideAttr);
     }
 
-    /** Vanilla-only build (no eco resolution); used for mask filler and any context without an EcoHook. */
+    /** Vanilla-only build, without eco item resolution. */
     public ItemStack build(Map<String, String> placeholders, List<String> lore) {
         return build(null, placeholders, lore);
     }
 
-    /** Build the stack, resolving eco item ids via {@code eco} when present, and filling {@code %placeholders%}. */
     public ItemStack build(EcoHook eco, Map<String, String> placeholders, List<String> lore) {
         String id = apply(lookupId, placeholders);
         ItemStack item = eco != null ? eco.resolve(id, 1) : null;
@@ -111,7 +104,6 @@ public final class ItemSpec {
         return item;
     }
 
-    /** Apply a base64 {@code texture:} or a {@code head:} owner to a player-head, the eco-suite way. */
     private void applyHeadTexture(ItemStack item, ItemMeta meta, Map<String, String> placeholders) {
         if (item.getType() != Material.PLAYER_HEAD || !(meta instanceof SkullMeta skull)) {
             return;
@@ -142,7 +134,7 @@ public final class ItemSpec {
         return material == null || material.isAir() ? Material.STONE : material;
     }
 
-    /** Split on spaces but keep quoted segments (so name:"a b c" stays one token). */
+    // keeps quoted segments together, so name:"a b c" stays one token
     private static List<String> tokenize(String raw) {
         List<String> out = new ArrayList<>();
         StringBuilder cur = new StringBuilder();

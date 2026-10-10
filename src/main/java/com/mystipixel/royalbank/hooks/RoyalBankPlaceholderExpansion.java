@@ -48,9 +48,8 @@ public final class RoyalBankPlaceholderExpansion extends PlaceholderExpansion {
             return "";
         }
 
-        // PlaceholderAPI may resolve placeholders from async threads, where the shared SQLite connection
-        // and some economy providers are unsafe to touch. Serve from the in-memory cache only; fall back
-        // to a DB load exclusively on the main thread, and skip wallet-dependent placeholders off-thread.
+        // PlaceholderAPI may call this async: serve from the cache, and only fall back to the DB on the
+        // main thread
         try {
             Optional<BankAccount> cached = bankService.getCachedAccount(player.getUniqueId());
             if (cached.isEmpty()) {
@@ -76,8 +75,7 @@ public final class RoyalBankPlaceholderExpansion extends PlaceholderExpansion {
                 case "next_interest_raw" -> String.valueOf(bankService.calculateInterest(account.balance(), level));
                 case "interest_time" -> bankService.getInterestTimeRemaining(player);
                 case "max_interest" -> bankService.money(level.maxInterest());
-                // Reads the live wallet via Vault (read-only). The common economy providers handle this
-                // safely from async threads; exceptions are caught below and rendered as an empty value.
+                // Vault read; common providers allow it async, and a failure renders as empty
                 case "combined_balance" -> bankService.money(account.balance() + bankService.getWalletBalance(player));
                 default -> null;
             };

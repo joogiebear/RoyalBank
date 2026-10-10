@@ -23,13 +23,8 @@ import java.util.UUID;
 import java.util.logging.Level;
 
 /**
- * Persistence layer over one HikariCP data source serving both SQLite (default, single server) and
- * MySQL (a shared bank DB across a network). The JDBC driver and pool are delivered by Paper's library
- * loader (see plugin.yml {@code libraries}); nothing is shaded.
- *
- * <p>Money-critical writes ({@link #saveAccountWithTransaction}, {@link #saveTransfer}) run inside a
- * single JDBC transaction on one pooled connection, so a balance change and its audit row — or both
- * legs of a transfer — either all commit or all roll back.
+ * SQLite or MySQL behind one HikariCP pool. Driver and pool come from Paper's library loader
+ * (plugin.yml {@code libraries}), nothing is shaded.
  */
 public final class BankDatabase {
 
@@ -47,8 +42,6 @@ public final class BankDatabase {
     public BankDatabase(JavaPlugin plugin) {
         this.plugin = plugin;
     }
-
-    // ------------------------------------------------------------------ lifecycle
 
     public boolean connect() {
         try {
@@ -87,10 +80,8 @@ public final class BankDatabase {
                 loadDriver("org.sqlite.JDBC");
                 hikari.setJdbcUrl("jdbc:sqlite:" + databaseFile.getAbsolutePath());
                 hikari.setDriverClassName("org.sqlite.JDBC");
-                // SQLite is single-writer: a pool of 1 avoids SQLITE_BUSY entirely.
                 hikari.setMaximumPoolSize(SqliteSettings.POOL_SIZE);
-                // Driver properties, not connectionInitSql: sqlite-jdbc runs only the first statement
-                // of a multi-statement init string, so everything after journal_mode was dropped.
+                // driver properties, not connectionInitSql: sqlite-jdbc runs only the first statement of it
                 hikari.setDataSourceProperties(SqliteSettings.properties());
             }
 
@@ -186,7 +177,7 @@ public final class BankDatabase {
         }
     }
 
-    /** Adds columns introduced after the first release to older SQLite databases. (MySQL starts current.) */
+    // MySQL tables are always created current, only old SQLite files need this
     private void migrateSqlite() throws SQLException {
         Set<String> columns = new HashSet<>();
         try (Connection connection = dataSource.getConnection();
@@ -204,8 +195,6 @@ public final class BankDatabase {
             }
         }
     }
-
-    // ------------------------------------------------------------------ accounts
 
     public BankAccount getOrCreateAccount(OfflinePlayer player, int startingLevel) {
         Optional<BankAccount> existing = getAccount(player.getUniqueId());
@@ -252,7 +241,7 @@ public final class BankDatabase {
         }
     }
 
-    /** Persists an account. Returns false (and logs) on failure so callers can react instead of losing the write. */
+    /** Returns false (and logs) on failure so the caller can roll back. */
     public boolean saveAccount(BankAccount account) {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(saveAccountSql())) {
@@ -265,10 +254,7 @@ public final class BankDatabase {
         }
     }
 
-    /**
-     * Atomically persists the account balance/level change AND its audit transaction in one DB
-     * transaction. Either both land or neither does, so the ledger and balance never diverge.
-     */
+    /** Account row and its ledger row in one DB transaction: both land or neither does. */
     public boolean saveAccountWithTransaction(BankAccount account, String type, double amount, double balanceAfter, String note) {
         try (Connection connection = dataSource.getConnection()) {
             boolean previousAutoCommit = connection.getAutoCommit();
@@ -297,10 +283,7 @@ public final class BankDatabase {
         }
     }
 
-    /**
-     * Atomically moves money between two accounts: persists both balances AND both audit rows in one DB
-     * transaction, so a transfer can never debit one side without crediting the other.
-     */
+    /** Both balances and both ledger rows in one DB transaction. */
     public boolean saveTransfer(BankAccount sender, BankAccount recipient, double amount,
                                 String senderType, String senderNote,
                                 String recipientType, String recipientNote) {
@@ -336,13 +319,7 @@ public final class BankDatabase {
         }
     }
 
-    // ------------------------------------------------------------------ shared accounts
-
-    /**
-     * One-time fold of the old balance-only {@code shared_banks} rows into {@code player_banks} as full
-     * id-keyed accounts, so coop balances created before shared accounts gained levels aren't lost.
-     * Idempotent: only copies ids not already present as accounts.
-     */
+    /** Copies legacy {@code shared_banks} rows into {@code player_banks}. Idempotent. */
     public void migrateSharedAccountsToPlayerBanks(int startingLevel) {
         String sql = "INSERT INTO player_banks (uuid, username, balance, level, last_interest_claim, bonus_claimed) "
                 + "SELECT id, label, balance, ?, 0, 0 FROM shared_banks "
@@ -355,12 +332,11 @@ public final class BankDatabase {
                 plugin.getLogger().info("Migrated " + moved + " shared bank account(s) into player_banks.");
             }
         } catch (SQLException exception) {
-            // shared_banks may not exist on a brand-new install — harmless.
+            // shared_banks does not exist on a fresh install
             plugin.getLogger().fine("No shared_banks migration needed: " + exception.getMessage());
         }
     }
 
-    /** A shared account's balance, or {@code 0} if it doesn't exist yet. */
     public double getSharedBalance(UUID id) {
         String sql = "SELECT balance FROM shared_banks WHERE id = ?";
         try (Connection connection = dataSource.getConnection();
@@ -375,11 +351,7 @@ public final class BankDatabase {
         }
     }
 
-    /**
-     * Atomically upsert a shared account's balance/label AND write its audit row (keyed by the account
-     * id in {@code bank_transactions}) in one transaction — so a shared balance and its ledger never
-     * diverge, exactly like personal accounts.
-     */
+    /** Shared balance and its ledger row in one DB transaction. */
     public boolean saveSharedWithTransaction(UUID id, String label, double newBalance,
                                              String type, double amount, String note) {
         String upsert = mysql()
@@ -509,7 +481,7 @@ public final class BankDatabase {
         return transactions;
     }
 
-    /** Prunes old transactions on a pooled connection. The window function runs on SQLite 3.25+/MySQL 8+. */
+    // the window function needs SQLite 3.25+ or MySQL 8+
     public int pruneTransactions(int maxPerPlayer) {
         if (maxPerPlayer <= 0) {
             return 0;
@@ -535,15 +507,12 @@ public final class BankDatabase {
         }
     }
 
-    /** The SQLite database file, or {@code null} on MySQL (where file-based backups don't apply). */
+    /** {@code null} on MySQL. */
     public File getDatabaseFile() {
         return databaseFile;
     }
 
-    /**
-     * Creates a consistent SQLite backup via VACUUM INTO on a pooled connection. MySQL backups are out of
-     * scope (use your DB tooling), so this returns false there.
-     */
+    /** SQLite backup via VACUUM INTO. Returns false on MySQL. */
     public boolean backupTo(Path targetPath) {
         if (targetPath == null) {
             return false;

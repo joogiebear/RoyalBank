@@ -21,8 +21,7 @@ class AmountsTest {
     void setUp() {
         plugin = mock(JavaPlugin.class);
         FileConfiguration config = mock(FileConfiguration.class);
-        // Return each config call's supplied default, so we exercise the shipped defaults
-        // (max-transaction 1e12, decimal-places 2, min-transaction 0.01).
+        // every config call returns its default: max-transaction 1e12, decimal-places 2, min-transaction 0.01
         when(config.getDouble(anyString(), anyDouble())).thenAnswer(invocation -> invocation.getArgument(1));
         when(config.getInt(anyString(), anyInt())).thenAnswer(invocation -> invocation.getArgument(1));
         when(plugin.getConfig()).thenReturn(config);

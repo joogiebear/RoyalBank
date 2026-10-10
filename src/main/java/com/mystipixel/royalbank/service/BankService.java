@@ -52,8 +52,7 @@ public final class BankService implements Listener, RoyalBankAPI {
     private final AbuseMonitor abuseMonitor;
     private AuditSink auditSink;
 
-    // Authoritative in-memory copy for online players. Write-through: every mutation persists to the
-    // DB first, then refreshes this cache. Read paths (GUI rendering, placeholders) never touch the DB.
+    // online players only; every mutation writes the DB first, then this cache, and reads never hit the DB
     private final Map<UUID, BankAccount> cache = new ConcurrentHashMap<>();
 
     public BankService(JavaPlugin plugin, BankDatabase database, LevelManager levelManager, VaultHook vaultHook) {
@@ -69,12 +68,11 @@ public final class BankService implements Listener, RoyalBankAPI {
         return abuseMonitor;
     }
 
-    /** Swap the audit destination (e.g. to EconGuard when present). */
     public void setAuditSink(AuditSink auditSink) {
         this.auditSink = auditSink;
     }
 
-    /** True when anti-abuse is handled by an external core (EconGuard) rather than the built-in monitor. */
+    /** True when EconGuard handles anti-abuse instead of the built-in monitor. */
     public boolean usesExternalAudit() {
         return !(auditSink instanceof LocalAuditSink);
     }
@@ -83,9 +81,7 @@ public final class BankService implements Listener, RoyalBankAPI {
     public void onPlayerJoin(PlayerJoinEvent event) {
         loadAccount(event.getPlayer());
         if (plugin.getConfig().getBoolean("settings.interest-on-join", true)) {
-            // Cooldown and empty-bank notices stay quiet at join — but a successful payout is
-            // announced. Interest that arrives silently either goes unnoticed or reads as a bug,
-            // and this is money the player earned. Delayed a little so it lands after the join noise.
+            // only a payout is announced at join (silent interest reads as a bug), delayed past join messages
             OperationResult interest = claimInterest(event.getPlayer(), false);
             if (interest.success() && interest.message() != null && !interest.message().isBlank()) {
                 Player player = event.getPlayer();
@@ -111,7 +107,7 @@ public final class BankService implements Listener, RoyalBankAPI {
         if (!plugin.getConfig().getBoolean("anti-abuse.notify-staff", true)) {
             return;
         }
-        // Deferred a tick so it lands after join messages and once permissions have settled.
+        // next tick: after join messages and once permissions have settled
         Bukkit.getScheduler().runTask(plugin, () -> {
             if (player.isOnline() && player.hasPermission("royalbank.alerts") && abuseMonitor.hasFlags()) {
                 player.sendMessage(Text.color("&c[RoyalBank] &e" + abuseMonitor.getFlags().size()
@@ -134,14 +130,14 @@ public final class BankService implements Listener, RoyalBankAPI {
             return cached;
         }
         BankAccount loaded = database.getOrCreateAccount(player, levelManager.getStartingLevel());
-        // Only cache for a player still online, so a load racing a quit cannot resurrect an evicted entry.
+        // online check stops a load racing a quit from resurrecting an evicted entry
         if (player.isOnline()) {
             cache.put(player.getUniqueId(), loaded);
         }
         return loaded;
     }
 
-    /** Cache-only lookup with no database fallback. Safe to call from any thread (e.g. async placeholders). */
+    /** Cache only, no database fallback. Safe from any thread. */
     public java.util.Optional<BankAccount> getCachedAccount(UUID uuid) {
         return java.util.Optional.ofNullable(cache.get(uuid));
     }
@@ -152,7 +148,6 @@ public final class BankService implements Listener, RoyalBankAPI {
         }
     }
 
-    /** Re-deposits money to a player after a failed DB write, logging loudly if the refund itself fails. */
     private boolean compensateDeposit(Player player, double amount, String operation) {
         EconomyResponse response = vaultHook.getEconomy().depositPlayer(player, amount);
         if (!response.transactionSuccess()) {
@@ -163,7 +158,6 @@ public final class BankService implements Listener, RoyalBankAPI {
         return true;
     }
 
-    /** Claws back money from a player after a failed DB write, logging loudly if the clawback itself fails. */
     private boolean compensateWithdraw(Player player, double amount, String operation) {
         EconomyResponse response = vaultHook.getEconomy().withdrawPlayer(player, amount);
         if (!response.transactionSuccess()) {
@@ -188,9 +182,8 @@ public final class BankService implements Listener, RoyalBankAPI {
             return OperationResult.fail("&cYour bank is already full. Upgrade it to store more money.");
         }
 
-        // The principal that actually lands in the bank, and the exact amount to debit from the purse,
-        // are both derived from the rounded post-deposit balance so the wallet debit and bank credit
-        // always match to the unit (no sub-unit creation/destruction, even with odd max-balance precision).
+        // both the bank credit and the wallet debit come from the rounded post-deposit balance, so they
+        // match to the unit
         double principalBalance = round(Math.min(account.balance() + Math.min(amount, availableSpace), level.maxBalance()));
         double charge = round(principalBalance - account.balance());
         if (charge <= 0.0) {
@@ -224,8 +217,7 @@ public final class BankService implements Listener, RoyalBankAPI {
                     : "&cDeposit could not be saved and your balance needs staff attention. Please contact an admin.");
         }
         cacheIfOnline(updated);
-        // Report the principal deposit (incoming=true so parking detection sees it) and any bonus as
-        // separate audit events, so the ledger's balance-after stays internally consistent.
+        // principal and bonus as separate audit events, so each balance-after stays consistent
         auditSink.record(player.getUniqueId(), player.getName(), "deposited", charge, account.balance(), principalBalance, true, null, null);
 
         if (paidBonus > 0.0) {
@@ -256,31 +248,23 @@ public final class BankService implements Listener, RoyalBankAPI {
         double newBalance = round(account.balance() - amount);
         BankAccount updated = account.withBalance(newBalance);
         if (!database.saveAccountWithTransaction(updated, "WITHDRAW", amount, newBalance, "Bank to purse")) {
-            // DB write failed: take back the cash we just handed out so money is not duplicated.
+            // take back the cash just handed out, or the money is duplicated
             boolean clawedBack = compensateWithdraw(player, amount, "withdrawal");
             return OperationResult.fail(clawedBack
                     ? "&cWithdrawal could not be saved and was reverted; please try again."
                     : "&cWithdrawal could not be saved and your balance needs staff attention. Please contact an admin.");
         }
         cacheIfOnline(updated);
-        // Withdrawals shrink the bank balance (incoming=false): audit + large-transaction alert only.
         auditSink.record(player.getUniqueId(), player.getName(), "withdrew", amount, account.balance(), newBalance, false, null, null);
         return OperationResult.success("&aWithdrew " + money(amount) + " &afrom your bank.");
     }
 
-    /**
-     * Moves money bank-to-bank from an online sender to another player (online or offline). No Vault
-     * involvement: the total in the bank system is conserved. Emits two audit events carrying the
-     * counterparty on each end, so EconGuard can link the two players for RMT / collusion detection.
-     * If the full amount will not fit under the recipient's level cap, the whole transfer is rejected.
-     */
+    /** Bank to bank, no Vault. Rejected outright if the full amount won't fit under the recipient's cap. */
     public OperationResult transfer(Player sender, OfflinePlayer recipient, double amount) {
         if (recipient.getUniqueId().equals(sender.getUniqueId())) {
             return OperationResult.fail("&cYou cannot transfer money to yourself.");
         }
-        // The anti-RMT lever RoyalTrade already has: an account too new to have earned anything is
-        // the classic shape of a throwaway alt receiving a character's wealth, and a gated trade
-        // system with an ungated bank transfer just moves the traffic here. Off by default.
+        // same playtime gate as RoyalTrade, or alt-account RMT just moves from trades to bank transfers
         double minHours = plugin.getConfig().getDouble("settings.transfer.min-playtime-hours", 0.0);
         if (minHours > 0) {
             String required = String.format(Locale.US, "%.0f", minHours);
@@ -328,9 +312,7 @@ public final class BankService implements Listener, RoyalBankAPI {
         cacheIfOnline(senderUpdated);
         cacheIfOnline(recipientUpdated);
 
-        // Report both ends with the counterparty set. The recipient's incoming event is what drives
-        // EconGuard's young-incoming / collusion signals; the sender's is audited too (and flagged as
-        // the other end of any collusion ring).
+        // both ends carry the counterparty so EconGuard can link the two players
         auditSink.record(sender.getUniqueId(), senderName, "transfer-sent", amount,
                 senderAccount.balance(), senderNew, false, recipient.getUniqueId(), recipientName);
         auditSink.record(recipient.getUniqueId(), recipientName, "transfer-received", amount,
@@ -338,8 +320,6 @@ public final class BankService implements Listener, RoyalBankAPI {
 
         return OperationResult.success("&aTransferred " + money(amount) + " &ato " + recipientName + "&a's bank.");
     }
-
-    // ── RoyalBankAPI: per-profile personal bank (the player's own account row) ─────
 
     @Override
     public BankSnapshot exportAccount(UUID playerId) {
@@ -367,9 +347,7 @@ public final class BankService implements Listener, RoyalBankAPI {
         return name != null ? name : "Account";
     }
 
-    // ── RoyalBankAPI: id-keyed accounts (shared / coop) ────────────────────────────
-
-    /** Load an account by arbitrary id, or a fresh unsaved one at the starting level. */
+    // a fresh unsaved account at the starting level if none exists
     private BankAccount loadAccountById(UUID accountId, String label) {
         return database.getAccount(accountId).orElseGet(() ->
                 new BankAccount(accountId, label == null ? "Account" : label, 0.0,
@@ -521,14 +499,14 @@ public final class BankService implements Listener, RoyalBankAPI {
 
         BankAccount updated = account.withLevel(nextLevel.level());
         if (!database.saveAccountWithTransaction(updated, "UPGRADE", nextLevel.upgradeMoneyCost(), updated.balance(), "Upgraded to " + nextLevel.name())) {
-            // Refund money; items have NOT been removed yet, so the player loses nothing.
+            // items have not been removed yet, so refunding the money is enough
             boolean refunded = compensateDeposit(player, nextLevel.upgradeMoneyCost(), "upgrade");
             return OperationResult.fail(refunded
                     ? "&cUpgrade could not be saved. Your money was refunded; please try again."
                     : "&cUpgrade could not be saved and your payment needs staff attention. Please contact an admin.");
         }
 
-        // Items are consumed only after the level grant is durably committed.
+        // consume items only after the level grant is committed
         removeItems(player, nextLevel.itemRequirements());
         cacheIfOnline(updated);
         return OperationResult.success("&aYour bank was upgraded to &e" + nextLevel.name() + "&a!");
@@ -551,8 +529,7 @@ public final class BankService implements Listener, RoyalBankAPI {
         BankLevel level = getEffectiveLevel(account.level());
         double interest = round(calculateInterest(account.balance(), level));
 
-        // Do NOT consume the cooldown when nothing is actually paid (empty/full bank), so players
-        // are not penalised by an auto-claim at join or a no-op manual claim.
+        // keep the cooldown when nothing is paid, so an auto-claim at join or a no-op claim costs nothing
         if (interest <= 0) {
             return OperationResult.success(manual ? "&eNo interest was earned because your bank balance is empty." : "");
         }
@@ -569,8 +546,7 @@ public final class BankService implements Listener, RoyalBankAPI {
                 return OperationResult.fail("&cInterest could not be saved; please try again.");
             }
             cacheIfOnline(updated);
-            // Interest grows the bank balance (incoming=true): compounding on a parked balance is part
-            // of the same parking signal, and it keeps the audit ledger complete.
+            // incoming: compounding on a parked balance is part of the parking signal
             auditSink.record(player.getUniqueId(), player.getName(), "interest", actuallyPaid, account.balance(), newBalance, true, null, null);
             return OperationResult.success("&aDaily interest paid to your bank: &e" + money(actuallyPaid));
         }
@@ -581,14 +557,13 @@ public final class BankService implements Listener, RoyalBankAPI {
         }
         BankAccount updated = account.withLastInterestClaim(now);
         if (!database.saveAccountWithTransaction(updated, "INTEREST", interest, account.balance(), "Daily interest to purse")) {
-            // Roll back the wallet payout so we do not pay interest twice on the next claim.
+            // or the next claim pays the interest twice
             boolean clawedBack = compensateWithdraw(player, interest, "interest payout");
             return OperationResult.fail(clawedBack
                     ? "&cInterest could not be saved and was reverted; please try again."
                     : "&cInterest could not be saved and your balance needs staff attention. Please contact an admin.");
         }
         cacheIfOnline(updated);
-        // Interest paid to the purse leaves the bank (incoming=false): audit + large-alert only.
         auditSink.record(player.getUniqueId(), player.getName(), "interest-to-purse", interest, account.balance(), account.balance(), false, null, null);
         return OperationResult.success("&aDaily interest paid to your wallet: &e" + money(interest));
     }
@@ -731,13 +706,12 @@ public final class BankService implements Listener, RoyalBankAPI {
                 + "\n&eMax Interest: &f" + money(nextLevel.maxInterest());
     }
 
-    /** The item requirements for the player's next tier (empty if maxed or none). Used for GUI cost icons. */
+    /** Empty if maxed or the next tier needs no items. */
     public List<ItemRequirement> nextUpgradeItemRequirements(Player player) {
         return levelManager.getNextLevel(getAccount(player).level())
                 .map(BankLevel::itemRequirements).orElse(List.of());
     }
 
-    /** How many matching items the player currently holds toward a requirement (vanilla or eco). */
     public int heldItemCount(Player player, ItemRequirement requirement) {
         return countItems(player.getInventory(), requirement);
     }
@@ -750,7 +724,7 @@ public final class BankService implements Listener, RoyalBankAPI {
         return vaultHook.getEconomy().getBalance(player);
     }
 
-    /** Hours played, from the same statistic RoyalTrade's gate reads. Works for offline players too. */
+    // same statistic RoyalTrade's gate reads; works for offline players
     private double playtimeHours(OfflinePlayer player) {
         return player.getStatistic(org.bukkit.Statistic.PLAY_ONE_MINUTE) / 20.0 / 3600.0;
     }
@@ -803,7 +777,6 @@ public final class BankService implements Listener, RoyalBankAPI {
         return plugin.getConfig().getLong("settings.interest-cooldown-hours", DEFAULT_INTEREST_COOLDOWN_HOURS);
     }
 
-    /** Rounds a money value to the configured decimal precision, cleaning up binary-fraction drift. */
     private double round(double value) {
         if (!Double.isFinite(value)) {
             return 0.0;
@@ -873,9 +846,7 @@ public final class BankService implements Listener, RoyalBankAPI {
         }
         PersistentDataContainer container = item.getItemMeta().getPersistentDataContainer();
 
-        // EcoItems' stable identity tag is ecoitems:item = <id>. If present, this is a custom item,
-        // not a vanilla material. We deliberately match only EcoItems' specific, documented keys here
-        // so unrelated plugins that tag vanilla items (shops, cosmetics, etc.) do not block vanilla upgrades.
+        // only EcoItems' own keys, so other plugins tagging vanilla items don't block vanilla upgrades
         return hasPdcString(container, "ecoitems", "item")
                 || hasPdcString(container, "ecoweapons", "weapon");
     }
@@ -891,17 +862,17 @@ public final class BankService implements Listener, RoyalBankAPI {
         String wantedId = parts.length == 2 ? parts[1] : normalized;
         PersistentDataContainer container = item.getItemMeta().getPersistentDataContainer();
 
-        // EcoItems currently tags items as ecoitems:item = <id>. This is the most important stable path.
+        // ecoitems:item = <id>
         if (matchesPdcString(container, namespace, "item", wantedId)) {
             return true;
         }
 
-        // Legacy EcoWeapons/EcoItems migration path visible in EcoItems' ItemUtils.kt.
+        // legacy EcoWeapons tag (see EcoItems' ItemUtils.kt)
         if (namespace.equals("ecoitems") && matchesPdcString(container, "ecoweapons", "weapon", wantedId)) {
             return true;
         }
 
-        // Tolerate the "ecoitem" namespace alias used in some configs.
+        // "ecoitem" alias used in some configs
         if (namespace.equals("ecoitem")) {
             return matchesEcoItem(item, "ecoitems:" + wantedId);
         }

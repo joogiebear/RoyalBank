@@ -14,7 +14,7 @@ public final class ConfigValidator {
 
     public void validate() {
         validateMainConfig();
-        // Menu layouts (gui/*.yml) are validated leniently by the menu engine itself at load time.
+        // gui/*.yml menus are validated by the menu engine at load time
     }
 
     private void validateMainConfig() {
@@ -64,9 +64,8 @@ public final class ConfigValidator {
             lastTo = tranche.to();
         }
 
-        // Flag a real "dead earning zone": tranches stop below max-balance AND they cannot even reach the
-        // interest cap, so balances above the top tranche silently earn nothing extra. A small slack keeps
-        // this quiet for configs whose tranches already (nearly) reach the cap.
+        // dead earning zone: balances above the top tranche earn nothing extra and the cap is out of
+        // reach; the 5% slack keeps configs that nearly reach the cap quiet
         if (hasTranches && lastTo < level.maxBalance()) {
             double cap = effectiveInterestCap(level);
             if (potentialInterest < cap * 0.95) {
