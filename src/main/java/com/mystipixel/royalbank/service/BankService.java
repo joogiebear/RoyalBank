@@ -42,6 +42,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Level;
 
 public final class BankService implements Listener, RoyalBankAPI {
     private static final long DEFAULT_INTEREST_COOLDOWN_HOURS = 31L;
@@ -53,6 +54,7 @@ public final class BankService implements Listener, RoyalBankAPI {
     private final AbuseMonitor abuseMonitor;
     private final MessageManager messages;
     private AuditSink auditSink;
+    private final CoopContributions coopContributions = new CoopContributions();
 
     // online players only; every mutation writes the DB first, then this cache, and reads never hit the DB
     private final Map<UUID, BankAccount> cache = new ConcurrentHashMap<>();
@@ -219,12 +221,13 @@ public final class BankService implements Listener, RoyalBankAPI {
             return OperationResult.fail(refunded ? "deposit.refunded" : "deposit.needs-staff");
         }
         cacheIfOnline(updated);
-        // principal and bonus as separate audit events, so each balance-after stays consistent
-        auditSink.record(player.getUniqueId(), player.getName(), "deposited", charge, account.balance(), principalBalance, true, null, null);
+        // principal and bonus as separate audit events, so each balance-after stays consistent.
+        // The principal is the player's own purse money, not new wealth, so it is not incoming.
+        report(player.getUniqueId(), player.getName(), "deposited", charge, account.balance(), principalBalance, false, null, null);
 
         if (paidBonus > 0.0) {
             database.addTransaction(player.getUniqueId(), "BONUS", paidBonus, newBalance, messages.get("notes.bonus"));
-            auditSink.record(player.getUniqueId(), player.getName(), "bonus", paidBonus, principalBalance, newBalance, true, null, null);
+            report(player.getUniqueId(), player.getName(), "bonus", paidBonus, principalBalance, newBalance, true, null, null);
             return OperationResult.success("deposit.success-bonus", "amount", money(charge), "bonus", money(paidBonus));
         }
         return OperationResult.success("deposit.success", "amount", money(charge));
@@ -255,7 +258,7 @@ public final class BankService implements Listener, RoyalBankAPI {
             return OperationResult.fail(clawedBack ? "withdraw.reverted" : "withdraw.needs-staff");
         }
         cacheIfOnline(updated);
-        auditSink.record(player.getUniqueId(), player.getName(), "withdrew", amount, account.balance(), newBalance, false, null, null);
+        report(player.getUniqueId(), player.getName(), "withdrew", amount, account.balance(), newBalance, false, null, null);
         return OperationResult.success("withdraw.success", "amount", money(amount));
     }
 
@@ -311,9 +314,9 @@ public final class BankService implements Listener, RoyalBankAPI {
         cacheIfOnline(recipientUpdated);
 
         // both ends carry the counterparty so EconGuard can link the two players
-        auditSink.record(sender.getUniqueId(), senderName, "transfer-sent", amount,
+        report(sender.getUniqueId(), senderName, "transfer-sent", amount,
                 senderAccount.balance(), senderNew, false, recipient.getUniqueId(), recipientName);
-        auditSink.record(recipient.getUniqueId(), recipientName, "transfer-received", amount,
+        report(recipient.getUniqueId(), recipientName, "transfer-received", amount,
                 recipientAccount.balance(), recipientNew, true, sender.getUniqueId(), senderName);
 
         return OperationResult.success("transfer.success", "amount", money(amount), "player", recipientName);
@@ -424,6 +427,8 @@ public final class BankService implements Listener, RoyalBankAPI {
             compensateDeposit(purse, charge, "account deposit");
             return OperationResult.fail("account.deposit.refunded");
         }
+        coopContributions.deposited(accountId, purse.getUniqueId(), purse.getName(), charge);
+        report(purse.getUniqueId(), purse.getName(), "coop-deposited", charge, account.balance(), principal, false, null, null);
         return OperationResult.silent();
     }
 
@@ -447,7 +452,36 @@ public final class BankService implements Listener, RoyalBankAPI {
             compensateWithdraw(purse, amount, "account withdrawal");
             return OperationResult.fail("withdraw.reverted");
         }
+        reportCoopWithdrawal(purse, accountId, amount, account.balance());
         return OperationResult.silent();
+    }
+
+    // Money a member paid in and takes back is an internal move. Money another member paid in is
+    // incoming from that member, and money with no known depositor is incoming with no counterparty.
+    private void reportCoopWithdrawal(Player purse, UUID accountId, double amount, double oldBalance) {
+        double balance = oldBalance;
+        for (CoopContributions.Share share : coopContributions.withdrawn(accountId, purse.getUniqueId(), amount)) {
+            double after = round(balance - share.amount());
+            if (purse.getUniqueId().equals(share.depositor())) {
+                report(purse.getUniqueId(), purse.getName(), "coop-withdrew", share.amount(), balance, after, false, null, null);
+            } else if (share.depositor() != null) {
+                report(purse.getUniqueId(), purse.getName(), "coop-received", share.amount(), balance, after, true,
+                        share.depositor(), share.depositorName());
+            } else {
+                report(purse.getUniqueId(), purse.getName(), "coop-withdrew-untracked", share.amount(), balance, after, true, null, null);
+            }
+            balance = after;
+        }
+    }
+
+    // runs after the money has moved, so a failed report is logged and never fails the bank action
+    private void report(UUID uuid, String username, String action, double amount, double oldBalance, double newBalance,
+                        boolean incoming, UUID counterparty, String counterpartyName) {
+        try {
+            auditSink.record(uuid, username, action, amount, oldBalance, newBalance, incoming, counterparty, counterpartyName);
+        } catch (RuntimeException e) {
+            plugin.getLogger().log(Level.WARNING, "Could not report bank action '" + action + "' for " + username, e);
+        }
     }
 
     private OperationResult upgradeAccount(Player purse, UUID accountId, String label) {
@@ -560,7 +594,7 @@ public final class BankService implements Listener, RoyalBankAPI {
             }
             cacheIfOnline(updated);
             // incoming: compounding on a parked balance is part of the parking signal
-            auditSink.record(player.getUniqueId(), player.getName(), "interest", actuallyPaid, account.balance(), newBalance, true, null, null);
+            report(player.getUniqueId(), player.getName(), "interest", actuallyPaid, account.balance(), newBalance, true, null, null);
             return OperationResult.success("interest.paid-to-bank", "amount", money(actuallyPaid));
         }
 
@@ -575,7 +609,7 @@ public final class BankService implements Listener, RoyalBankAPI {
             return OperationResult.fail(clawedBack ? "interest.reverted" : "interest.needs-staff");
         }
         cacheIfOnline(updated);
-        auditSink.record(player.getUniqueId(), player.getName(), "interest-to-purse", interest, account.balance(), account.balance(), false, null, null);
+        report(player.getUniqueId(), player.getName(), "interest-to-purse", interest, account.balance(), account.balance(), true, null, null);
         return OperationResult.success("interest.paid-to-purse", "amount", money(interest));
     }
 
