@@ -1,3 +1,9 @@
+## 2026.41.1 - 2026-10-11
+
+### Fixes
+- say shorthand amounts work in the custom amount error (`d59c434`)
+- report bank movements to EconGuard with the right direction and counterparty (`cd4f818`)
+
 ## 2026.41.0 - 2026-10-10
 
 ### Refactors
