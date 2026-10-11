@@ -30,6 +30,8 @@ public final class BankDatabase {
 
     public enum Type { SQLITE, MYSQL }
 
+    private static final double CONTRIBUTION_EPSILON = 1e-6;
+
     private static final String INSERT_TRANSACTION_SQL =
             "INSERT INTO bank_transactions (uuid, type, amount, balance_after, created_at, note) VALUES (?, ?, ?, ?, ?, ?)";
 
@@ -164,11 +166,31 @@ public final class BankDatabase {
                     balance REAL NOT NULL DEFAULT 0
                 )
                 """;
+        String contributionsDdl = mysql() ? """
+                CREATE TABLE IF NOT EXISTS coop_contributions (
+                    account_id VARCHAR(36) NOT NULL,
+                    member_uuid VARCHAR(36) NOT NULL,
+                    member_name VARCHAR(32) NOT NULL DEFAULT '',
+                    amount DOUBLE NOT NULL,
+                    seq BIGINT NOT NULL,
+                    PRIMARY KEY (account_id, member_uuid)
+                )
+                """ : """
+                CREATE TABLE IF NOT EXISTS coop_contributions (
+                    account_id TEXT NOT NULL,
+                    member_uuid TEXT NOT NULL,
+                    member_name TEXT NOT NULL DEFAULT '',
+                    amount REAL NOT NULL,
+                    seq INTEGER NOT NULL,
+                    PRIMARY KEY (account_id, member_uuid)
+                )
+                """;
         try (Connection connection = dataSource.getConnection();
              Statement statement = connection.createStatement()) {
             statement.executeUpdate(banksDdl);
             statement.executeUpdate(transactionsDdl);
             statement.executeUpdate(sharedDdl);
+            statement.executeUpdate(contributionsDdl);
             if (!mysql()) {
                 statement.executeUpdate(
                         "CREATE INDEX IF NOT EXISTS idx_bank_transactions_uuid_created ON bank_transactions(uuid, created_at DESC)");
@@ -293,6 +315,12 @@ public final class BankDatabase {
 
     /** Account row and its ledger row in one DB transaction: both land or neither does. */
     public boolean saveAccountWithTransaction(BankAccount account, String type, double amount, double balanceAfter, String note) {
+        return saveCoopMovement(account, type, amount, balanceAfter, note, List.of());
+    }
+
+    // a shared account movement: the account row, its ledger row and the depositor changes land together
+    public boolean saveCoopMovement(BankAccount account, String type, double amount, double balanceAfter, String note,
+                                    List<CoopContribution> contributionChanges) {
         try (Connection connection = dataSource.getConnection()) {
             boolean previousAutoCommit = connection.getAutoCommit();
             connection.setAutoCommit(false);
@@ -305,6 +333,7 @@ public final class BankDatabase {
                     bindTransaction(transactionStatement, account.uuid(), type, amount, balanceAfter, note);
                     transactionStatement.executeUpdate();
                 }
+                applyContributionChanges(connection, contributionChanges);
                 connection.commit();
                 return true;
             } catch (SQLException exception) {
@@ -354,6 +383,69 @@ public final class BankDatabase {
             plugin.getLogger().severe("Bank DB connection error (transfer): " + exception.getMessage());
             return false;
         }
+    }
+
+    // relative updates, so a change made on another server sharing the MySQL database is not overwritten
+    private void applyContributionChanges(Connection connection, List<CoopContribution> changes) throws SQLException {
+        if (changes.isEmpty()) {
+            return;
+        }
+        String add = mysql()
+                ? "INSERT INTO coop_contributions (account_id, member_uuid, member_name, amount, seq) VALUES (?, ?, ?, ?, ?) "
+                + "ON DUPLICATE KEY UPDATE amount = amount + VALUES(amount), member_name = VALUES(member_name)"
+                : "INSERT INTO coop_contributions (account_id, member_uuid, member_name, amount, seq) VALUES (?, ?, ?, ?, ?) "
+                + "ON CONFLICT(account_id, member_uuid) DO UPDATE SET amount = coop_contributions.amount + excluded.amount, "
+                + "member_name = excluded.member_name";
+        String subtract = "UPDATE coop_contributions SET amount = amount + ? WHERE account_id = ? AND member_uuid = ?";
+        String dropEmpty = "DELETE FROM coop_contributions WHERE account_id = ? AND member_uuid = ? AND amount <= ?";
+        try (PreparedStatement addStatement = connection.prepareStatement(add);
+             PreparedStatement subtractStatement = connection.prepareStatement(subtract);
+             PreparedStatement dropStatement = connection.prepareStatement(dropEmpty)) {
+            for (CoopContribution change : changes) {
+                String accountId = change.account().toString();
+                String member = change.member().toString();
+                if (change.amount() > 0.0) {
+                    addStatement.setString(1, accountId);
+                    addStatement.setString(2, member);
+                    addStatement.setString(3, change.memberName() == null ? "" : change.memberName());
+                    addStatement.setDouble(4, change.amount());
+                    addStatement.setLong(5, change.seq());
+                    addStatement.executeUpdate();
+                } else {
+                    subtractStatement.setDouble(1, change.amount());
+                    subtractStatement.setString(2, accountId);
+                    subtractStatement.setString(3, member);
+                    subtractStatement.executeUpdate();
+                    dropStatement.setString(1, accountId);
+                    dropStatement.setString(2, member);
+                    dropStatement.setDouble(3, CONTRIBUTION_EPSILON);
+                    dropStatement.executeUpdate();
+                }
+            }
+        }
+    }
+
+    // ordered by account, then by when each member first paid in
+    public List<CoopContribution> loadCoopContributions() {
+        String sql = "SELECT account_id, member_uuid, member_name, amount, seq FROM coop_contributions ORDER BY account_id, seq";
+        List<CoopContribution> rows = new ArrayList<>();
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql);
+             ResultSet resultSet = statement.executeQuery()) {
+            while (resultSet.next()) {
+                rows.add(new CoopContribution(
+                        UUID.fromString(resultSet.getString("account_id")),
+                        UUID.fromString(resultSet.getString("member_uuid")),
+                        resultSet.getString("member_name"),
+                        resultSet.getDouble("amount"),
+                        resultSet.getLong("seq")));
+            }
+        } catch (SQLException exception) {
+            plugin.getLogger().severe("Could not load coop depositors; coop withdrawals will be reported as untracked: "
+                    + exception.getMessage());
+            return List.of();
+        }
+        return rows;
     }
 
     /** Copies legacy {@code shared_banks} rows into {@code player_banks}. Idempotent. */
