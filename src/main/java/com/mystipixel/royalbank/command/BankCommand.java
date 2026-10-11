@@ -5,9 +5,9 @@ import com.mystipixel.royalbank.config.LevelManager;
 import com.mystipixel.royalbank.data.BankAccount;
 import com.mystipixel.royalbank.data.BankTransaction;
 import com.mystipixel.royalbank.gui.BankGui;
+import com.mystipixel.royalbank.message.MessageManager;
 import com.mystipixel.royalbank.security.AbuseMonitor;
 import com.mystipixel.royalbank.service.BankService;
-import com.mystipixel.royalbank.service.OperationResult;
 import com.mystipixel.royalbank.util.Amounts;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
@@ -37,6 +37,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     private final BankService bankService;
     private final LevelManager levelManager;
     private final BankGui bankGui;
+    private final MessageManager messages;
 
     // keyed by sender; expired entries are ignored
     private final Map<UUID, PendingTransfer> pendingTransfers = new ConcurrentHashMap<>();
@@ -49,6 +50,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         this.bankService = bankService;
         this.levelManager = levelManager;
         this.bankGui = bankGui;
+        this.messages = plugin.getMessageManager();
     }
 
     @Override
@@ -61,12 +63,12 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         }
 
         if (!(sender instanceof Player player)) {
-            msg(sender, "player-only", "&7Only players can use player bank commands. Use /bank admin for staff tools.");
+            messages.send(sender, "player-only");
             return true;
         }
 
         if (!player.hasPermission("royalbank.use")) {
-            msg(player, "permission.bank", "&cYou do not have permission to use the bank.");
+            messages.send(player, "permission.bank");
             return true;
         }
 
@@ -76,8 +78,8 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         }
 
         if (args[0].equalsIgnoreCase("balance")) {
-            sendMultiline(player, bankService.describeBalance(player));
-            send(player, "&7Use &e/bank &7to open the GUI, or &e/bank deposit <amount>&7, &e/bank withdraw <amount>&7, &e/bank upgrade&7.");
+            messages.sendEach(player, bankService.describeBalance(player));
+            messages.send(player, "info.balance-hint");
             return true;
         }
 
@@ -87,26 +89,25 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             case "transfer" -> handleTransfer(player, args);
             case "upgrade" -> handleUpgrade(player);
             case "interest" -> handleInterest(player);
-            case "info" -> sendMultiline(player, bankService.describeNextUpgrade(player));
-            default -> msg(player, "unknown-command", "&cUnknown subcommand. Use /bank, /bank deposit, /bank withdraw, /bank transfer, /bank upgrade, /bank interest, /bank info, or /bank admin.");
+            case "info" -> messages.sendEach(player, bankService.describeNextUpgrade(player));
+            default -> messages.send(player, "unknown-command");
         }
         return true;
     }
 
     private boolean handleReload(CommandSender sender) {
         if (!sender.hasPermission("royalbank.admin")) {
-            msg(sender, "permission.admin", "&cYou do not have permission to use RoyalBank admin commands.");
+            messages.send(sender, "permission.admin");
             return true;
         }
         plugin.reloadRoyalBank();
-        msg(sender, "reload-success", "&aRoyalBank reloaded. Loaded levels: {levels}",
-                Map.of("levels", String.valueOf(levelManager.getOrderedLevelNumbers())));
+        messages.send(sender, "reload-success", "levels", String.valueOf(levelManager.getOrderedLevelNumbers()));
         return true;
     }
 
     private boolean handleAdmin(CommandSender sender, String[] args) {
         if (!sender.hasPermission("royalbank.admin")) {
-            msg(sender, "permission.admin", "&cYou do not have permission to use RoyalBank admin commands.");
+            messages.send(sender, "permission.admin");
             return true;
         }
 
@@ -132,35 +133,35 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
 
     private void handleDeposit(Player player, String[] args) {
         if (!player.hasPermission("royalbank.deposit")) {
-            msg(player, "permission.deposit", "&cYou do not have permission to deposit.");
+            messages.send(player, "permission.deposit");
             return;
         }
-        Double amount = parseAmount(player, args, "deposit");
+        Double amount = parseAmount(player, args, "deposit.usage");
         if (amount == null) {
             return;
         }
-        sendResult(player, bankService.deposit(player, amount));
+        messages.sendResult(player, bankService.deposit(player, amount));
     }
 
     private void handleWithdraw(Player player, String[] args) {
         if (!player.hasPermission("royalbank.withdraw")) {
-            msg(player, "permission.withdraw", "&cYou do not have permission to withdraw.");
+            messages.send(player, "permission.withdraw");
             return;
         }
-        Double amount = parseAmount(player, args, "withdraw");
+        Double amount = parseAmount(player, args, "withdraw.usage");
         if (amount == null) {
             return;
         }
-        sendResult(player, bankService.withdraw(player, amount));
+        messages.sendResult(player, bankService.withdraw(player, amount));
     }
 
     private void handleInterest(Player player) {
-        sendResult(player, bankService.claimInterest(player, true));
+        messages.sendResult(player, bankService.claimInterest(player, true));
     }
 
     private void handleTransfer(Player player, String[] args) {
         if (!player.hasPermission("royalbank.transfer")) {
-            msg(player, "permission.transfer", "&cYou do not have permission to transfer money.");
+            messages.send(player, "permission.transfer");
             return;
         }
         if (args.length == 2 && args[1].equalsIgnoreCase("confirm")) {
@@ -168,25 +169,26 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             return;
         }
         if (args.length == 2 && args[1].equalsIgnoreCase("cancel")) {
-            send(player, pendingTransfers.remove(player.getUniqueId()) != null
-                    ? "&7Pending transfer cancelled."
-                    : "&7You have no transfer awaiting confirmation.");
+            if (pendingTransfers.remove(player.getUniqueId()) != null) {
+                messages.send(player, "transfer.cancelled");
+            } else {
+                messages.send(player, "transfer.cancel-nothing-pending");
+            }
             return;
         }
         if (args.length < 3) {
-            send(player, "&cUsage: /bank transfer <player> <amount>");
+            messages.send(player, "transfer.usage");
             return;
         }
         OfflinePlayer target = Bukkit.getOfflinePlayer(args[1]);
         // Reject names that have never joined, so a typo cannot silently create a junk "ghost" account.
         if (!target.hasPlayedBefore() && !target.isOnline()) {
-            msg(player, "admin.unknown-player", "&cNo bank account exists for '{player}'. They must join the server first.",
-                    Map.of("player", args[1]));
+            messages.send(player, "admin.unknown-player", "player", args[1]);
             return;
         }
         Double amount = Amounts.parse(plugin, args[2]);
         if (amount == null) {
-            send(player, "&cThat is not a safe valid number. Minimum: " + bankService.money(plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01)) + ". &7Tip: use k/m/b/t, e.g. &f5m&7 = 5,000,000.");
+            sendInvalidAmount(player);
             return;
         }
 
@@ -195,25 +197,25 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         if (threshold > 0 && amount >= threshold) {
             pendingTransfers.put(player.getUniqueId(), new PendingTransfer(target.getUniqueId(), amount, System.currentTimeMillis()));
             String targetName = target.getName() == null ? args[1] : target.getName();
-            send(player, "&eLarge transfer: &f" + bankService.money(amount) + " &eto &f" + targetName + "&e.");
-            send(player, "&7Type &f/bank transfer confirm &7within " + confirmTimeoutSeconds() + "s to send, or &f/bank transfer cancel&7.");
+            messages.send(player, "transfer.confirm-large", "amount", bankService.money(amount), "player", targetName);
+            messages.send(player, "transfer.confirm-hint", "seconds", String.valueOf(confirmTimeoutSeconds()));
             return;
         }
-        sendResult(player, bankService.transfer(player, target, amount));
+        messages.sendResult(player, bankService.transfer(player, target, amount));
     }
 
     private void confirmTransfer(Player player) {
         PendingTransfer pending = pendingTransfers.remove(player.getUniqueId());
         if (pending == null) {
-            send(player, "&cYou have no transfer awaiting confirmation.");
+            messages.send(player, "transfer.confirm-nothing-pending");
             return;
         }
         if (System.currentTimeMillis() - pending.createdAt() > confirmTimeoutSeconds() * 1000L) {
-            send(player, "&cThat transfer expired. Please run it again.");
+            messages.send(player, "transfer.confirm-expired");
             return;
         }
         // full transfer path again so balance and cap are re-validated at confirm time
-        sendResult(player, bankService.transfer(player, Bukkit.getOfflinePlayer(pending.recipient()), pending.amount()));
+        messages.sendResult(player, bankService.transfer(player, Bukkit.getOfflinePlayer(pending.recipient()), pending.amount()));
     }
 
     private long confirmTimeoutSeconds() {
@@ -222,7 +224,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
 
     private void handleUpgrade(Player player) {
         if (!player.hasPermission("royalbank.upgrade")) {
-            msg(player, "permission.upgrade", "&cYou do not have permission to upgrade your bank.");
+            messages.send(player, "permission.upgrade");
             return;
         }
         bankGui.openConfirmUpgrade(player);
@@ -234,38 +236,37 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             return;
         }
         BankAccount account = plugin.getDatabase().getOrCreateAccount(target, levelManager.getStartingLevel());
-        msg(sender, "admin.balance-line", "&e{player} &7Bank: &f{balance} &7Level: &f{level}",
-                Map.of(
-                        "player", String.valueOf(account.username()),
-                        "balance", bankService.money(account.balance()),
-                        "level", String.valueOf(account.level())));
+        messages.send(sender, "admin.balance-line",
+                "player", String.valueOf(account.username()),
+                "balance", bankService.money(account.balance()),
+                "level", String.valueOf(account.level()));
     }
 
     private void handleAdminSetBalance(CommandSender sender, String[] args) {
         OfflinePlayer target = target(sender, args, 2);
-        Double amount = parseAdminAmount(sender, args, 3, "setbalance <player> <amount>", true);
+        Double amount = parseAdminAmount(sender, args, 3, "admin.usage.setbalance", true);
         if (target == null || amount == null) {
             return;
         }
-        sendResult(sender, bankService.setBalance(target, amount));
+        messages.sendResult(sender, bankService.setBalance(target, amount));
     }
 
     private void handleAdminAddBalance(CommandSender sender, String[] args) {
         OfflinePlayer target = target(sender, args, 2);
-        Double amount = parseAdminAmount(sender, args, 3, "addbalance <player> <amount>", false);
+        Double amount = parseAdminAmount(sender, args, 3, "admin.usage.addbalance", false);
         if (target == null || amount == null) {
             return;
         }
-        sendResult(sender, bankService.addBalance(target, amount));
+        messages.sendResult(sender, bankService.addBalance(target, amount));
     }
 
     private void handleAdminRemoveBalance(CommandSender sender, String[] args) {
         OfflinePlayer target = target(sender, args, 2);
-        Double amount = parseAdminAmount(sender, args, 3, "removebalance <player> <amount>", false);
+        Double amount = parseAdminAmount(sender, args, 3, "admin.usage.removebalance", false);
         if (target == null || amount == null) {
             return;
         }
-        sendResult(sender, bankService.removeBalance(target, amount));
+        messages.sendResult(sender, bankService.removeBalance(target, amount));
     }
 
     private void handleAdminSetLevel(CommandSender sender, String[] args) {
@@ -274,13 +275,13 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             return;
         }
         if (args.length < 4) {
-            send(sender, "&cUsage: /bank admin setlevel <player> <level>");
+            messages.send(sender, "admin.usage.setlevel");
             return;
         }
         try {
-            sendResult(sender, bankService.setLevel(target, Integer.parseInt(args[3])));
+            messages.sendResult(sender, bankService.setLevel(target, Integer.parseInt(args[3])));
         } catch (NumberFormatException exception) {
-            msg(sender, "admin.level-number", "&cLevel must be a whole number.");
+            messages.send(sender, "admin.level-number");
         }
     }
 
@@ -289,7 +290,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         if (target == null) {
             return;
         }
-        sendResult(sender, bankService.resetAccount(target));
+        messages.sendResult(sender, bankService.resetAccount(target));
     }
 
     private void handleAdminTransactions(CommandSender sender, String[] args) {
@@ -299,52 +300,55 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         }
         List<BankTransaction> transactions = plugin.getDatabase().getRecentTransactions(target.getUniqueId(), 10);
         if (transactions.isEmpty()) {
-            msg(sender, "admin.transactions-empty", "&eNo transactions found for {player}.",
-                    Map.of("player", String.valueOf(target.getName())));
+            messages.send(sender, "admin.transactions-empty", "player", String.valueOf(target.getName()));
             return;
         }
-        msg(sender, "admin.transactions-header", "&eRecent transactions for {player}:",
-                Map.of("player", String.valueOf(target.getName())));
+        messages.send(sender, "admin.transactions-header", "player", String.valueOf(target.getName()));
         for (BankTransaction transaction : transactions) {
-            send(sender, "&7#" + transaction.id() + " &f" + transaction.type() + " &e" + bankService.money(transaction.amount())
-                    + " &7after &f" + bankService.money(transaction.balanceAfter()) + " &8- &7" + transaction.note());
+            messages.send(sender, "admin.transactions-line",
+                    "id", String.valueOf(transaction.id()),
+                    "type", transaction.type(),
+                    "amount", bankService.money(transaction.amount()),
+                    "balance_after", bankService.money(transaction.balanceAfter()),
+                    "note", String.valueOf(transaction.note()));
         }
     }
 
     private void handleAdminFlags(CommandSender sender, String[] args) {
         if (bankService.usesExternalAudit()) {
-            send(sender, "&eAnti-abuse is handled by EconGuard on this server. Use &f/econguard flags&e.");
+            messages.send(sender, "admin.flags-external");
             return;
         }
         AbuseMonitor monitor = bankService.getAbuseMonitor();
         if (args.length >= 3 && args[2].equalsIgnoreCase("clear")) {
             monitor.clearFlags();
-            send(sender, "&aCleared all anti-abuse flags.");
+            messages.send(sender, "admin.flags-cleared");
             return;
         }
         Collection<AbuseMonitor.Flag> flags = monitor.getFlags();
         if (flags.isEmpty()) {
-            send(sender, "&aNo anti-abuse flags. All clear.");
+            messages.send(sender, "admin.flags-empty");
             return;
         }
-        send(sender, "&eAnti-abuse flags (" + flags.size() + "): &7clear with /bank admin flags clear");
+        messages.send(sender, "admin.flags-header", "count", String.valueOf(flags.size()));
         long now = Instant.now().getEpochSecond();
         for (AbuseMonitor.Flag flag : flags) {
             long minutesAgo = Math.max(0, (now - flag.timestamp()) / 60L);
-            send(sender, "&c• &e" + flag.username() + " &7- " + flag.reason() + " &8(" + minutesAgo + "m ago)");
+            messages.send(sender, "admin.flags-line", "player", flag.username(), "reason", flag.reason(),
+                    "minutes", String.valueOf(minutesAgo));
         }
     }
 
     private void handleAdminBackup(CommandSender sender) {
         File databaseFile = plugin.getDatabase().getDatabaseFile();
         if (databaseFile == null || !databaseFile.exists()) {
-            msg(sender, "admin.backup-missing-db", "&cDatabase file does not exist yet.");
+            messages.send(sender, "admin.backup-missing-db");
             return;
         }
 
         File backupFolder = new File(plugin.getDataFolder(), "backups");
         if (!backupFolder.exists() && !backupFolder.mkdirs()) {
-            msg(sender, "admin.backup-folder-failed", "&cCould not create backup folder.");
+            messages.send(sender, "admin.backup-folder-failed");
             return;
         }
 
@@ -354,10 +358,9 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             boolean ok = plugin.getDatabase().backupTo(backupFile.toPath());
             Bukkit.getScheduler().runTask(plugin, () -> {
                 if (ok) {
-                    msg(sender, "admin.backup-success", "&aCreated database backup: &f{path}",
-                            Map.of("path", backupFile.getAbsolutePath()));
+                    messages.send(sender, "admin.backup-success", "path", backupFile.getAbsolutePath());
                 } else {
-                    msg(sender, "admin.backup-failed", "&cBackup failed. Check console for details.");
+                    messages.send(sender, "admin.backup-failed");
                 }
             });
         });
@@ -365,79 +368,50 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
 
     private OfflinePlayer target(CommandSender sender, String[] args, int index) {
         if (args.length <= index) {
-            msg(sender, "admin.missing-player", "&cMissing player name.");
+            messages.send(sender, "admin.missing-player");
             return null;
         }
         OfflinePlayer player = Bukkit.getOfflinePlayer(args[index]);
         // Reject names that have never joined, so a typo cannot silently create a junk "ghost" account.
         if (!player.hasPlayedBefore() && !player.isOnline()) {
-            msg(sender, "admin.unknown-player", "&cNo bank account exists for '{player}'. They must join the server first.",
-                    Map.of("player", args[index]));
+            messages.send(sender, "admin.unknown-player", "player", args[index]);
             return null;
         }
         return player;
     }
 
-    private Double parseAmount(Player player, String[] args, String usage) {
+    private Double parseAmount(Player player, String[] args, String usageKey) {
         if (args.length < 2) {
-            send(player, "&cUsage: /bank " + usage + " <amount>");
+            messages.send(player, usageKey);
             return null;
         }
         Double amount = Amounts.parse(plugin, args[1]);
         if (amount == null) {
-            send(player, "&cThat is not a safe valid number. Minimum: " + bankService.money(plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01)) + ". &7Tip: use k/m/b/t, e.g. &f5m&7 = 5,000,000.");
+            sendInvalidAmount(player);
         }
         return amount;
     }
 
-    private Double parseAdminAmount(CommandSender sender, String[] args, int index, String usage, boolean allowZero) {
+    private void sendInvalidAmount(Player player) {
+        messages.send(player, "amount.invalid",
+                "minimum", bankService.money(plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01)));
+    }
+
+    private Double parseAdminAmount(CommandSender sender, String[] args, int index, String usageKey, boolean allowZero) {
         if (args.length <= index) {
-            send(sender, "&cUsage: /bank admin " + usage);
+            messages.send(sender, usageKey);
             return null;
         }
         Double amount = Amounts.parse(plugin, args[index], allowZero);
         if (amount == null) {
-            msg(sender, "admin.invalid-number", "&cThat is not a safe valid number.");
+            messages.send(sender, "admin.invalid-number");
         }
         return amount;
     }
 
-    private void sendResult(CommandSender sender, OperationResult result) {
-        if (result.message() == null || result.message().isBlank()) {
-            return;
-        }
-        send(sender, result.message());
-    }
-
-    private void send(CommandSender sender, String message) {
-        plugin.getMessageManager().sendRaw(sender, message);
-    }
-
-    private void msg(CommandSender sender, String key, String fallback) {
-        plugin.getMessageManager().send(sender, key, fallback);
-    }
-
-    private void msg(CommandSender sender, String key, String fallback, Map<String, String> placeholders) {
-        plugin.getMessageManager().send(sender, key, fallback, placeholders);
-    }
-
-    private void sendMultiline(CommandSender sender, String message) {
-        for (String line : message.split("\n")) {
-            send(sender, line);
-        }
-    }
-
     private void sendAdminUsage(CommandSender sender) {
-        msg(sender, "admin.usage-header", "&eRoyalBank Admin Commands:");
-        send(sender, "&7/bank admin balance <player>");
-        send(sender, "&7/bank admin setbalance <player> <amount>");
-        send(sender, "&7/bank admin addbalance <player> <amount>");
-        send(sender, "&7/bank admin removebalance <player> <amount>");
-        send(sender, "&7/bank admin setlevel <player> <level>");
-        send(sender, "&7/bank admin reset <player>");
-        send(sender, "&7/bank admin transactions <player>");
-        send(sender, "&7/bank admin backup");
-        send(sender, "&7/bank admin flags [clear]");
+        messages.send(sender, "admin.usage-header");
+        messages.sendLines(sender, "admin.usage-lines");
     }
 
     @Override

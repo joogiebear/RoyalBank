@@ -76,7 +76,7 @@ public final class RoyalBankPlugin extends JavaPlugin {
         }
         fullyEnabled = true;
 
-        this.bankService = new BankService(this, database, levelManager, vaultHook);
+        this.bankService = new BankService(this, database, levelManager, vaultHook, messageManager);
         database.migrateSharedAccountsToPlayerBanks(levelManager.getStartingLevel());
         getServer().getServicesManager().register(
                 com.mystipixel.royalbank.api.RoyalBankAPI.class, bankService, this,

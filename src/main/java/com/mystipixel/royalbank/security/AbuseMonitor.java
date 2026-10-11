@@ -1,5 +1,6 @@
 package com.mystipixel.royalbank.security;
 
+import com.mystipixel.royalbank.message.MessageManager;
 import com.mystipixel.royalbank.util.Text;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
@@ -30,12 +31,14 @@ public final class AbuseMonitor {
     }
 
     private final JavaPlugin plugin;
+    private final MessageManager messages;
     private final Map<UUID, Deque<Sample>> velocity = new ConcurrentHashMap<>();
     private final Map<UUID, Flag> flags = new ConcurrentHashMap<>();
     private volatile HttpClient httpClient;
 
-    public AbuseMonitor(JavaPlugin plugin) {
+    public AbuseMonitor(JavaPlugin plugin, MessageManager messages) {
         this.plugin = plugin;
+        this.messages = messages;
     }
 
     /** Call after a successful balance change. {@code amount} is the money moved; old/new are bank balances. */
@@ -50,11 +53,13 @@ public final class AbuseMonitor {
         }
         double txnThreshold = plugin.getConfig().getDouble("anti-abuse.large-transaction-alerts.transaction-threshold", 100_000_000.0);
         if (txnThreshold > 0 && amount >= txnThreshold) {
-            alert("&c[Anti-Abuse] &e" + safe(username) + " &7" + action + " &f" + money(amount) + " &7(bank now " + money(newBalance) + ")");
+            alert(messages.get("alerts.large-transaction", "player", safe(username), "action", action,
+                    "amount", money(amount), "balance", money(newBalance)));
         }
         double balThreshold = plugin.getConfig().getDouble("anti-abuse.large-transaction-alerts.balance-threshold", 500_000_000.0);
         if (balThreshold > 0 && oldBalance < balThreshold && newBalance >= balThreshold) {
-            alert("&c[Anti-Abuse] &e" + safe(username) + " &7bank balance crossed &f" + money(balThreshold) + " &7(now " + money(newBalance) + ")");
+            alert(messages.get("alerts.balance-crossed", "player", safe(username),
+                    "threshold", money(balThreshold), "balance", money(newBalance)));
         }
     }
 
@@ -80,9 +85,9 @@ public final class AbuseMonitor {
         double total = samples.stream().mapToDouble(Sample::delta).sum();
 
         if (growthThreshold > 0 && total >= growthThreshold && !flags.containsKey(uuid)) {
-            String reason = "Gained " + money(total) + " in bank within " + windowMinutes + "m";
+            String reason = messages.get("alerts.growth-reason", "amount", money(total), "minutes", String.valueOf(windowMinutes));
             flags.put(uuid, new Flag(uuid, safe(username), reason, now));
-            alert("&4[Anti-Abuse] FLAGGED &e" + safe(username) + " &7" + reason + ". Review with &f/bank admin flags");
+            alert(messages.get("alerts.flagged", "player", safe(username), "reason", reason));
         }
     }
 
@@ -154,8 +159,8 @@ public final class AbuseMonitor {
         return Text.money(amount, plugin.getConfig().getString("settings.currency-symbol", "$"));
     }
 
-    private static String safe(String username) {
-        return username == null ? "Unknown" : username;
+    private String safe(String username) {
+        return username == null ? messages.get("alerts.unknown-player") : username;
     }
 
     private static String jsonEscape(String value) {

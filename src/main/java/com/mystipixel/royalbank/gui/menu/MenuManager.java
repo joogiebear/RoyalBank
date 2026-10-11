@@ -1,8 +1,13 @@
 package com.mystipixel.royalbank.gui.menu;
 
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -38,7 +43,16 @@ public final class MenuManager {
         if (!file.exists()) {
             plugin.saveResource("gui/" + fileName, false);
         }
-        return MenuTemplate.load(file, "&6&lBank", 4);
+        return MenuTemplate.load(file, bundled("gui/" + fileName), 4);
+    }
+
+    private YamlConfiguration bundled(String path) {
+        try (InputStream in = plugin.getResource(path)) {
+            return in == null ? null : YamlConfiguration.loadConfiguration(new InputStreamReader(in, StandardCharsets.UTF_8));
+        } catch (IOException exception) {
+            plugin.getLogger().warning("Could not read the bundled " + path + ": " + exception.getMessage());
+            return null;
+        }
     }
 
     public MenuTemplate get(String id) {

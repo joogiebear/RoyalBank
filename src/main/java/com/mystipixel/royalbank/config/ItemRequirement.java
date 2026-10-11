@@ -10,10 +10,9 @@ public record ItemRequirement(
         String customItemId,
         int amount
 ) {
-    /** Human-readable cost, e.g. "100x Enchanted Gold Block" or "64x Diamond" (never the raw id). */
-    public String displayName() {
-        String base = type == RequirementType.VANILLA ? material.name() : customItemId;
-        return amount + "x " + prettify(base);
+    // "Enchanted Gold Block" or "Diamond", never the raw id; messages.yml format.item-cost adds the amount
+    public String prettyName() {
+        return prettify(type == RequirementType.VANILLA ? material.name() : customItemId);
     }
 
     // "ecoitems:enchanted_gold_block" or "GOLD_BLOCK" to title case

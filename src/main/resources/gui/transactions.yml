@@ -38,6 +38,26 @@ pages:
         - "100000001"
         - "111111111"
 
+# One item per transaction in the '0' slots. items.<type> is picked by the transaction type (deposit,
+# withdraw, interest, bonus, upgrade, transfer_in, transfer_out, coop_deposit, admin_set, ...); types
+# not listed use items.default. A lore line with %note% is left out when the transaction has no note.
+# Placeholders: %amount%, %balance_after%, %time% (time-format is a Java DateTimeFormatter pattern),
+# %note%.
+entry:
+  time-format: "MM/dd HH:mm"
+  items:
+    deposit: lime_dye hide_attributes name:"&aDeposit"
+    withdraw: red_dye hide_attributes name:"&cWithdraw"
+    interest: clock hide_attributes name:"&bInterest"
+    bonus: emerald hide_attributes name:"&aBonus"
+    upgrade: gold_block hide_attributes name:"&eUpgrade"
+    default: paper hide_attributes name:"&fTransaction"
+  lore:
+    - "&7Amount: &f%amount%"
+    - "&7Balance After: &f%balance_after%"
+    - "&7Time: &f%time%"
+    - "&7Note: &f%note%"
+
 slots:
   - item: arrow name:"&7« Back"
     lore:
