@@ -4,7 +4,7 @@ player-only: "Only players can use player bank commands. Use /bank admin for sta
 reload-success: "&aRoyalBank reloaded. Loaded levels: {levels}"
 unknown-command: "&cUnknown subcommand. Use /bank, /bank deposit, /bank withdraw, /bank upgrade, /bank interest, /bank info, or /bank admin."
 custom-cancelled: "&eCustom bank action cancelled."
-custom-invalid-amount: "&cThat was not a safe valid amount. Use normal numbers only, or type cancel next time."
+custom-invalid-amount: "&cThat was not a safe valid amount. Use a number or shorthand (5k, 5m, 5b) without commas, or type cancel next time."
 # The custom amount dialog. In each prompt the first line is the dialog title and any further lines
 # are shown under it.
 input:
