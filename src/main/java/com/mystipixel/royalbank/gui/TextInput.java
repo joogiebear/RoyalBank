@@ -200,10 +200,9 @@ public final class TextInput implements Listener {
             this.messages = messages;
         }
 
-        // Plugin-specific: how a message key and a colour-coded line are read. Keep the fallbacks
-        // identical to the defaults shipped in messages.yml.
-        private String label(String key, String fallback) {
-            return messages.raw(key, fallback);
+        // Plugin-specific: how a message key and a colour-coded line are read.
+        private String label(String key) {
+            return messages.get(key);
         }
 
         private static Component color(String line) {
@@ -249,11 +248,11 @@ public final class TextInput implements Listener {
                             .build())
                     // a confirmation dialog's exit action is its second button, so Escape counts as Cancel
                     .type(DialogType.confirmation(
-                            ActionButton.builder(color(label("input.confirm", "&aDone")))
+                            ActionButton.builder(color(label("input.confirm")))
                                     .action(DialogAction.customClick(
                                             (response, audience) -> done.accept(response.getText(FIELD)), once))
                                     .build(),
-                            ActionButton.builder(color(label("input.cancel", "&cCancel")))
+                            ActionButton.builder(color(label("input.cancel")))
                                     .action(DialogAction.customClick((response, audience) -> cancel.run(), once))
                                     .build())));
             player.showDialog(dialog);

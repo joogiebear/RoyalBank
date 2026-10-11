@@ -6,10 +6,12 @@ import com.mystipixel.royalbank.config.ItemRequirement;
 import com.mystipixel.royalbank.config.RequirementType;
 import com.mystipixel.royalbank.data.BankAccount;
 import com.mystipixel.royalbank.data.BankTransaction;
+import com.mystipixel.royalbank.gui.menu.ItemSpec;
 import com.mystipixel.royalbank.gui.menu.MenuEffect;
 import com.mystipixel.royalbank.gui.menu.MenuManager;
 import com.mystipixel.royalbank.gui.menu.MenuSlot;
 import com.mystipixel.royalbank.gui.menu.MenuTemplate;
+import com.mystipixel.royalbank.message.MessageManager;
 import com.mystipixel.royalbank.service.BankService;
 import com.mystipixel.royalbank.service.OperationResult;
 import com.mystipixel.royalbank.util.Text;
@@ -17,6 +19,7 @@ import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.Sound;
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -44,18 +47,17 @@ import java.util.Map;
 // close_inventory, play_sound.
 public final class BankGui implements Listener {
 
-    private static final DateTimeFormatter TIME_FORMAT =
-            DateTimeFormatter.ofPattern("MM/dd HH:mm").withZone(ZoneId.systemDefault());
-
     private final RoyalBankPlugin plugin;
     private final BankService bankService;
     private final MenuManager menus;
     private final com.mystipixel.royalbank.hooks.EcoHook eco;
     private final TextInput textInput;
+    private final MessageManager messages;
 
     public BankGui(RoyalBankPlugin plugin, BankService bankService, TextInput textInput) {
         this.plugin = plugin;
         this.bankService = bankService;
+        this.messages = plugin.getMessageManager();
         this.menus = new MenuManager(plugin);
         this.eco = new com.mystipixel.royalbank.hooks.EcoHook();
         this.textInput = textInput;
@@ -124,9 +126,12 @@ public final class BankGui implements Listener {
             return;
         }
         List<BankTransaction> transactions = bankService.getRecentTransactions(player, slots.size());
+        ConfigurationSection entry = template.config().getConfigurationSection("entry");
+        DateTimeFormatter timeFormat = DateTimeFormatter.ofPattern(entry.getString("time-format"))
+                .withZone(ZoneId.systemDefault());
         for (int i = 0; i < slots.size(); i++) {
             if (i < transactions.size()) {
-                inventory.setItem(slots.get(i), transactionItem(transactions.get(i)));
+                inventory.setItem(slots.get(i), transactionItem(entry, timeFormat, transactions.get(i)));
             }
         }
     }
@@ -137,12 +142,13 @@ public final class BankGui implements Listener {
             return;
         }
         List<ItemRequirement> requirements = bankService.nextUpgradeItemRequirements(player);
+        ConfigurationSection text = template.config().getConfigurationSection("cost-item");
         for (int i = 0; i < slots.size() && i < requirements.size(); i++) {
-            inventory.setItem(slots.get(i), costIcon(player, requirements.get(i)));
+            inventory.setItem(slots.get(i), costIcon(player, text, requirements.get(i)));
         }
     }
 
-    private ItemStack costIcon(Player player, ItemRequirement requirement) {
+    private ItemStack costIcon(Player player, ConfigurationSection text, ItemRequirement requirement) {
         String id = requirement.type() == RequirementType.VANILLA
                 ? requirement.material().name()
                 : requirement.customItemId();
@@ -159,13 +165,16 @@ public final class BankGui implements Listener {
         ItemMeta meta = icon.getItemMeta();
         if (meta != null) {
             List<Component> lore = meta.hasLore() ? new ArrayList<>(meta.lore()) : new ArrayList<>();
+            Map<String, String> values = MessageManager.pairs(
+                    "id", String.valueOf(requirement.customItemId()),
+                    "amount", String.valueOf(requirement.amount()),
+                    "held", String.valueOf(held));
             // show the raw id so a wrong or not-yet-created id is obvious
             if (!resolved && requirement.type() == RequirementType.ECOITEMS) {
-                meta.displayName(Text.item("&f" + requirement.customItemId()));
-                lore.add(Text.item("&8(not loaded in eco)"));
+                meta.displayName(Text.item(placeholders(text.getString("unresolved-name"), values)));
+                lore.addAll(Text.items(placeholders(text.getStringList("unresolved-lore"), values)));
             }
-            lore.add(Text.item("&7Required: &f" + requirement.amount()));
-            lore.add(Text.item((enough ? "&aYou have: &f" : "&cYou have: &f") + held + "&7/&f" + requirement.amount()));
+            lore.addAll(Text.items(placeholders(text.getStringList(enough ? "lore-enough" : "lore-missing"), values)));
             meta.lore(lore);
             meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
             icon.setItemMeta(meta);
@@ -208,14 +217,12 @@ public final class BankGui implements Listener {
             case "deposit" -> handleDeposit(player, menuId, effect.argString("amount", "custom"));
             case "withdraw" -> handleWithdraw(player, menuId, effect.argString("amount", "custom"));
             case "upgrade" -> {
-                if (requirePermission(player, menuId, "royalbank.upgrade", "permission.upgrade",
-                        "&cYou do not have permission to upgrade your bank.")) {
+                if (requirePermission(player, menuId, "royalbank.upgrade", "permission.upgrade")) {
                     openConfirmUpgrade(player);
                 }
             }
             case "confirm_upgrade" -> {
-                if (requirePermission(player, menuId, "royalbank.upgrade", "permission.upgrade",
-                        "&cYou do not have permission to upgrade your bank.")) {
+                if (requirePermission(player, menuId, "royalbank.upgrade", "permission.upgrade")) {
                     runAndRefresh(player, menuId, bankService.upgrade(player));
                 }
             }
@@ -228,8 +235,7 @@ public final class BankGui implements Listener {
     }
 
     private void handleDeposit(Player player, String menuId, String amountArg) {
-        if (!requirePermission(player, menuId, "royalbank.deposit", "permission.deposit",
-                "&cYou do not have permission to deposit.")) {
+        if (!requirePermission(player, menuId, "royalbank.deposit", "permission.deposit")) {
             return;
         }
         double wallet = bankService.getWalletBalance(player);
@@ -251,8 +257,7 @@ public final class BankGui implements Listener {
     }
 
     private void handleWithdraw(Player player, String menuId, String amountArg) {
-        if (!requirePermission(player, menuId, "royalbank.withdraw", "permission.withdraw",
-                "&cYou do not have permission to withdraw.")) {
+        if (!requirePermission(player, menuId, "royalbank.withdraw", "permission.withdraw")) {
             return;
         }
         double balance = bankService.getAccount(player).balance();
@@ -277,15 +282,13 @@ public final class BankGui implements Listener {
     private void promptForAmount(Player player, String menuId, PendingAmount.Kind kind) {
         playSound(menus.get(menuId), player, "sounds.prompt");
         List<String> title = kind == PendingAmount.Kind.DEPOSIT
-                ? plugin.getMessageManager().lines("input.deposit",
-                        List.of("&fDeposit a custom amount", "&7Shorthand works too (5k, 5m, 5b)."))
-                : plugin.getMessageManager().lines("input.withdraw",
-                        List.of("&fWithdraw a custom amount", "&7Shorthand works too (5k, 5m, 5b)."));
+                ? messages.lines("input.deposit")
+                : messages.lines("input.withdraw");
         textInput.request(player, title, typed -> {
             if (typed == null) {
                 // nothing was moved; only put the bank back if nothing else has the screen
                 if (canReopen(player)) {
-                    msg(player, "custom-cancelled", "&eCustom bank action cancelled.");
+                    messages.send(player, "custom-cancelled");
                     openMain(player);
                 }
                 return;
@@ -308,20 +311,21 @@ public final class BankGui implements Listener {
             return;
         }
         if (message.isBlank() || message.equalsIgnoreCase("cancel")) {
-            msg(player, "custom-cancelled", "&eCustom bank action cancelled.");
+            messages.send(player, "custom-cancelled");
             openMain(player);
             return;
         }
-        String permission = kind == PendingAmount.Kind.DEPOSIT ? "royalbank.deposit" : "royalbank.withdraw";
-        if (!player.hasPermission(permission)) {
-            msg(player, kind == PendingAmount.Kind.DEPOSIT ? "permission.deposit" : "permission.withdraw",
-                    kind == PendingAmount.Kind.DEPOSIT ? "&cYou do not have permission to deposit."
-                            : "&cYou do not have permission to withdraw.");
+        if (kind == PendingAmount.Kind.DEPOSIT && !player.hasPermission("royalbank.deposit")) {
+            messages.send(player, "permission.deposit");
+            return;
+        }
+        if (kind == PendingAmount.Kind.WITHDRAW && !player.hasPermission("royalbank.withdraw")) {
+            messages.send(player, "permission.withdraw");
             return;
         }
         Double parsed = com.mystipixel.royalbank.util.Amounts.parse(plugin, message);
         if (parsed == null) {
-            msg(player, "custom-invalid-amount", "&cThat was not a valid amount. Use a number like &f5000&c or shorthand like &f5m&c (k/m/b/t), or type cancel next time.");
+            messages.send(player, "custom-invalid-amount");
             openMain(player);
             return;
         }
@@ -336,20 +340,18 @@ public final class BankGui implements Listener {
         // bank menus are stateless per open
     }
 
-    private boolean requirePermission(Player player, String menuId, String permission, String messageKey, String fallback) {
+    private boolean requirePermission(Player player, String menuId, String permission, String messageKey) {
         if (player.hasPermission(permission)) {
             return true;
         }
-        msg(player, messageKey, fallback);
+        messages.send(player, messageKey);
         playSound(menus.get(menuId), player, "sounds.fail");
         player.closeInventory();
         return false;
     }
 
     private void runAndRefresh(Player player, String menuId, OperationResult result) {
-        if (result.message() != null && !result.message().isBlank()) {
-            send(player, result.message());
-        }
+        messages.sendResult(player, result);
         playSound(menus.get(menuId), player, result.success() ? "sounds.success" : "sounds.fail");
         Bukkit.getScheduler().runTask(plugin, () -> openMain(player));
     }
@@ -359,7 +361,7 @@ public final class BankGui implements Listener {
         List<String> out = new ArrayList<>();
         for (String line : lore) {
             if (line.contains("%upgrade_info%")) {
-                for (String upgradeLine : bankService.describeNextUpgrade(player).split("\\n")) {
+                for (String upgradeLine : bankService.describeNextUpgrade(player)) {
                     out.add(line.replace("%upgrade_info%", upgradeLine));
                 }
             } else {
@@ -394,42 +396,39 @@ public final class BankGui implements Listener {
         return map;
     }
 
-    private ItemStack transactionItem(BankTransaction transaction) {
-        String type = transaction.type().toUpperCase(Locale.ROOT);
-        Material material = switch (type) {
-            case "DEPOSIT" -> Material.LIME_DYE;
-            case "WITHDRAW" -> Material.RED_DYE;
-            case "INTEREST" -> Material.CLOCK;
-            case "BONUS" -> Material.EMERALD;
-            case "UPGRADE" -> Material.GOLD_BLOCK;
-            default -> Material.PAPER;
-        };
-        String title = switch (type) {
-            case "DEPOSIT" -> "&aDeposit";
-            case "WITHDRAW" -> "&cWithdraw";
-            case "INTEREST" -> "&bInterest";
-            case "BONUS" -> "&aBonus";
-            case "UPGRADE" -> "&eUpgrade";
-            default -> "&fTransaction";
-        };
+    // the item comes from entry.items.<type>, or entry.items.default for types not listed
+    private ItemStack transactionItem(ConfigurationSection entry, DateTimeFormatter timeFormat, BankTransaction transaction) {
+        String type = transaction.type().toLowerCase(Locale.ROOT);
+        String spec = entry.getString(entry.isString("items." + type) ? "items." + type : "items.default");
+        boolean hasNote = transaction.note() != null && !transaction.note().isBlank();
+        Map<String, String> values = new LinkedHashMap<>();
+        values.put("amount", bankService.money(transaction.amount()));
+        values.put("balance_after", bankService.money(transaction.balanceAfter()));
+        values.put("time", timeFormat.format(Instant.ofEpochSecond(transaction.createdAt())));
+        values.put("note", hasNote ? transaction.note() : "");
         List<String> lore = new ArrayList<>();
-        lore.add("&7Amount: &f" + bankService.money(transaction.amount()));
-        lore.add("&7Balance After: &f" + bankService.money(transaction.balanceAfter()));
-        lore.add("&7Time: &f" + TIME_FORMAT.format(Instant.ofEpochSecond(transaction.createdAt())));
-        if (transaction.note() != null && !transaction.note().isBlank()) {
-            lore.add("&7Note: &f" + transaction.note());
+        for (String line : entry.getStringList("lore")) {
+            if (hasNote || !line.contains("%note%")) {
+                lore.add(line);
+            }
         }
-        return simpleItem(material, title, lore);
+        return ItemSpec.parse(spec).build(values, lore);
     }
 
-    private ItemStack simpleItem(Material material, String name, List<String> lore) {
-        ItemStack item = new ItemStack(material);
-        ItemMeta meta = item.getItemMeta();
-        meta.displayName(Text.item(name));
-        meta.lore(Text.items(lore));
-        meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
-        item.setItemMeta(meta);
-        return item;
+    private static List<String> placeholders(List<String> lines, Map<String, String> values) {
+        List<String> out = new ArrayList<>(lines.size());
+        for (String line : lines) {
+            out.add(placeholders(line, values));
+        }
+        return out;
+    }
+
+    private static String placeholders(String line, Map<String, String> values) {
+        String out = line == null ? "" : line;
+        for (Map.Entry<String, String> value : values.entrySet()) {
+            out = out.replace("%" + value.getKey() + "%", value.getValue());
+        }
+        return out;
     }
 
     private GuiContext context(Player player) {
@@ -459,14 +458,6 @@ public final class BankGui implements Listener {
         } catch (IllegalArgumentException exception) {
             plugin.getLogger().warning("Unknown GUI sound: " + rawSound);
         }
-    }
-
-    private void send(Player player, String message) {
-        plugin.getMessageManager().sendRaw(player, message);
-    }
-
-    private void msg(Player player, String key, String fallback) {
-        plugin.getMessageManager().send(player, key, fallback);
     }
 
     private static final class PendingAmount {

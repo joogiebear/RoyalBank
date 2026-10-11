@@ -20,10 +20,26 @@ permission:
   bank: "&cYou do not have permission to use the bank."
   deposit: "&cYou do not have permission to deposit."
   withdraw: "&cYou do not have permission to withdraw."
+  transfer: "&cYou do not have permission to transfer money."
   upgrade: "&cYou do not have permission to upgrade your bank."
   admin: "&cYou do not have permission to use RoyalBank admin commands."
 admin:
   usage-header: "&eRoyalBank Admin Commands:"
+  usage-lines:
+    - "&7/bank admin balance <player>"
+    - "&7/bank admin setbalance <player> <amount>"
+    - "&7/bank admin addbalance <player> <amount>"
+    - "&7/bank admin removebalance <player> <amount>"
+    - "&7/bank admin setlevel <player> <level>"
+    - "&7/bank admin reset <player>"
+    - "&7/bank admin transactions <player>"
+    - "&7/bank admin backup"
+    - "&7/bank admin flags [clear]"
+  usage:
+    setbalance: "&cUsage: /bank admin setbalance <player> <amount>"
+    addbalance: "&cUsage: /bank admin addbalance <player> <amount>"
+    removebalance: "&cUsage: /bank admin removebalance <player> <amount>"
+    setlevel: "&cUsage: /bank admin setlevel <player> <level>"
   missing-player: "&cMissing player name."
   unknown-player: "&cNo bank account exists for '{player}'. They must join the server first."
   unknown-player-warning: "&eWarning: player has not joined before. Creating a bank record for name: {player}"
@@ -32,7 +48,174 @@ admin:
   balance-line: "&e{player} &7Bank: &f{balance} &7Level: &f{level}"
   transactions-empty: "&eNo transactions found for {player}."
   transactions-header: "&eRecent transactions for {player}:"
+  # {type} is the stored type id, e.g. DEPOSIT, TRANSFER_OUT, ADMIN_SET.
+  transactions-line: "&7#{id} &f{type} &e{amount} &7after &f{balance_after} &8- &7{note}"
   backup-missing-db: "&cDatabase file does not exist yet."
   backup-folder-failed: "&cCould not create backup folder."
   backup-success: "&aCreated database backup: &f{path}"
   backup-failed: "&cBackup failed. Check console for details."
+  flags-external: "&eAnti-abuse is handled by EconGuard on this server. Use &f/econguard flags&e."
+  flags-cleared: "&aCleared all anti-abuse flags."
+  flags-empty: "&aNo anti-abuse flags. All clear."
+  flags-header: "&eAnti-abuse flags ({count}): &7clear with /bank admin flags clear"
+  flags-line: "&c• &e{player} &7- {reason} &8({minutes}m ago)"
+  # Results of the admin balance, level and reset commands.
+  result:
+    invalid-amount: "&cInvalid balance amount."
+    above-limit: "&cAmount is above the configured transaction limit."
+    balance-not-saved: "&cCould not save balance change; please try again."
+    set-balance: "&aSet {player}'s bank balance to &e{balance}&a."
+    set-balance-capped: "&aSet {player}'s bank balance to &e{balance}&a. &7({discarded} above the level cap was discarded.)"
+    add-balance: "&aAdded &e{amount} &ato {player}'s bank."
+    add-balance-capped: "&aAdded &e{amount} &ato {player}'s bank. &7({discarded} could not fit under the level cap and was discarded.)"
+    remove-balance: "&aRemoved &e{amount} &afrom {player}'s bank."
+    unknown-level: "&cUnknown bank level: {level}"
+    level-not-saved: "&cCould not save level change; please try again."
+    set-level: "&aSet {player}'s bank level to &e{level} - {level_name}&a."
+    set-level-capped: "&aSet {player}'s bank level to &e{level} - {level_name}&a. &7(Balance reduced by {discarded} to fit the new level cap.)"
+    reset-not-saved: "&cCould not reset account; please try again."
+    reset: "&aReset {player}'s bank account."
+
+# Amount checks shared by deposit, withdraw and transfer.
+amount:
+  too-small: "&cAmount must be at least {minimum}."
+  invalid: "&cThat is not a safe valid number. Minimum: {minimum}. &7Tip: use k/m/b/t, e.g. &f5m&7 = 5,000,000."
+
+deposit:
+  usage: "&cUsage: /bank deposit <amount>"
+  bank-full: "&cYour bank is already full. Upgrade it to store more money."
+  not-enough-money: "&cYou do not have enough money to deposit that amount."
+  # {reason} is the economy plugin's error text.
+  failed: "&cDeposit failed: {reason}"
+  refunded: "&cDeposit could not be saved. Your money was refunded; please try again."
+  needs-staff: "&cDeposit could not be saved and your balance needs staff attention. Please contact an admin."
+  success: "&aDeposited {amount} &ainto your bank."
+  success-bonus: "&aDeposited {amount} &aand received a first deposit bonus of &e{bonus}&a!"
+
+withdraw:
+  usage: "&cUsage: /bank withdraw <amount>"
+  not-enough-money: "&cYour bank does not have that much money."
+  failed: "&cWithdraw failed: {reason}"
+  reverted: "&cWithdrawal could not be saved and was reverted; please try again."
+  needs-staff: "&cWithdrawal could not be saved and your balance needs staff attention. Please contact an admin."
+  success: "&aWithdrew {amount} &afrom your bank."
+
+transfer:
+  usage: "&cUsage: /bank transfer <player> <amount>"
+  self: "&cYou cannot transfer money to yourself."
+  sender-playtime: "&cBank transfers unlock after &f{hours}h&c of playtime."
+  recipient-playtime: "&c{player} hasn't played &f{hours}h&c yet, so they can't receive bank transfers."
+  # {player} in recipient-playtime when the recipient's name is not known.
+  unknown-recipient: "That player"
+  not-enough-money: "&cYour bank does not have that much money to transfer."
+  recipient-full: "&c{player}'s bank cannot hold that much - they only have {space} of space."
+  not-saved: "&cThe transfer could not be saved; no money was moved. Please try again."
+  success: "&aTransferred {amount} &ato {player}&a's bank."
+  # Transfers at or above settings.transfer.confirm-threshold ask for /bank transfer confirm.
+  confirm-large: "&eLarge transfer: &f{amount} &eto &f{player}&e."
+  confirm-hint: "&7Type &f/bank transfer confirm &7within {seconds}s to send, or &f/bank transfer cancel&7."
+  confirm-nothing-pending: "&cYou have no transfer awaiting confirmation."
+  confirm-expired: "&cThat transfer expired. Please run it again."
+  cancelled: "&7Pending transfer cancelled."
+  cancel-nothing-pending: "&7You have no transfer awaiting confirmation."
+
+upgrade:
+  max-level: "&eYour bank is already at the maximum level."
+  locked: "&cBank upgrades unlock once your purse and bank have at least {required} &ccombined."
+  not-enough-money: "&cYou need {cost} &cto upgrade."
+  missing-items: "&cMissing upgrade items: &f{items}"
+  failed: "&cUpgrade payment failed: {reason}"
+  refunded: "&cUpgrade could not be saved. Your money was refunded; please try again."
+  needs-staff: "&cUpgrade could not be saved and your payment needs staff attention. Please contact an admin."
+  success: "&aYour bank was upgraded to &e{level_name}&a!"
+
+interest:
+  disabled: "&cManual interest claiming is disabled."
+  cooldown: "&eYou can claim interest again in {time}."
+  nothing-earned: "&eNo interest was earned because your bank balance is empty."
+  bank-full: "&eYour bank is full, so no interest could be deposited."
+  not-saved: "&cInterest could not be saved; please try again."
+  paid-to-bank: "&aDaily interest paid to your bank: &e{amount}"
+  failed: "&cInterest payout failed: {reason}"
+  reverted: "&cInterest could not be saved and was reverted; please try again."
+  needs-staff: "&cInterest could not be saved and your balance needs staff attention. Please contact an admin."
+  paid-to-purse: "&aDaily interest paid to your wallet: &e{amount}"
+
+# Errors returned to plugins that run a shared bank through the RoyalBank API (e.g. RoyalSkyblock coop
+# banks). Errors not listed here use the deposit/withdraw/upgrade keys above.
+account:
+  deposit:
+    bank-full: "&cThe bank is full. Upgrade it to store more."
+    not-enough-money: "&cYou don't have enough money to deposit that."
+    refunded: "&cDeposit could not be saved; your money was refunded."
+  withdraw:
+    not-enough-money: "&cThe bank doesn't have that much money."
+  upgrade:
+    max-level: "&eThe bank is already at the maximum level."
+    not-enough-money: "&cYou need {cost} to upgrade."
+
+# /bank balance and /bank info. The menus' %upgrade_info% placeholder shows the same lines as /bank info.
+info:
+  balance:
+    - "&eBank Level: &f{level} - {level_name}"
+    - "&eBalance: &f{balance} / {max_balance}"
+    - "&eMax Interest: &f{max_interest}"
+    - "&eNext Interest: &f{next_interest}"
+  balance-hint: "&7Use &e/bank &7to open the GUI, or &e/bank deposit <amount>&7, &e/bank withdraw <amount>&7, &e/bank upgrade&7."
+  max-level:
+    - "&eYour bank is already max level."
+  upgrades-locked:
+    - "&cBank Upgrades Locked"
+    - "&7Requires bank + purse total: &f{required}"
+    - "&7Current combined total: &f{combined}"
+  next-upgrade:
+    - "&eNext Level: &f{level} - {level_name}"
+    - "&eMoney Cost: &f{money_cost}"
+    - "&eItem Cost: &f{item_cost}"
+    - "&eMax Balance: &f{max_balance}"
+    - "&eMax Interest: &f{max_interest}"
+
+# Words and formats used inside other messages and placeholders.
+format:
+  # %royalbank_interest_time% and the menus' %interest_time% when interest can be claimed.
+  ready-now: "Ready now"
+  duration-hours: "{hours}h {minutes}m"
+  duration-minutes: "{minutes}m"
+  # Upgrade item costs, e.g. "64x Gold Block, 1x Palatial Bank Core".
+  item-cost: "{amount}x {item}"
+  item-separator: ", "
+  item-have: "{item} (have {count})"
+  no-items: "None"
+
+# Staff alerts (royalbank.alerts permission), also written to the console and the Discord webhook.
+# {action} is the audit action id, e.g. deposited, withdrew, transfer-sent, interest.
+alerts:
+  pending-flags: "&c[RoyalBank] &e{count} anti-abuse flag(s) pending review. &7Use &f/bank admin flags"
+  large-transaction: "&c[Anti-Abuse] &e{player} &7{action} &f{amount} &7(bank now {balance})"
+  balance-crossed: "&c[Anti-Abuse] &e{player} &7bank balance crossed &f{threshold} &7(now {balance})"
+  flagged: "&4[Anti-Abuse] FLAGGED &e{player} &7{reason}. Review with &f/bank admin flags"
+  # {reason} in flagged, and the reason listed by /bank admin flags.
+  growth-reason: "Gained {amount} in bank within {minutes}m"
+  unknown-player: "Unknown"
+
+# Notes saved with new transactions and shown in the history menu and /bank admin transactions.
+# Changing them does not rewrite transactions that are already saved.
+notes:
+  deposit: "Purse to bank"
+  withdraw: "Bank to purse"
+  bonus: "First deposit bonus"
+  transfer-out: "Transfer to {player}"
+  transfer-in: "Transfer from {player}"
+  account-deposit: "{player} deposited"
+  account-withdraw: "{player} withdrew"
+  upgrade: "Upgraded to {level_name}"
+  interest: "Daily interest"
+  interest-to-purse: "Daily interest to purse"
+  admin-set-balance: "Admin set balance"
+  admin-set-balance-capped: "Admin set balance (capped at level max, discarded {discarded})"
+  admin-add-balance: "Admin added balance"
+  admin-add-balance-capped: "Admin added balance (capped, discarded {discarded})"
+  admin-remove-balance: "Admin removed balance"
+  admin-set-level: "Admin set level to {level_name}"
+  admin-set-level-capped: "Admin set level to {level_name} (balance capped, discarded {discarded})"
+  admin-reset: "Admin reset account"

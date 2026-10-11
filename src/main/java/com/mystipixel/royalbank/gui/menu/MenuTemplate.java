@@ -14,6 +14,8 @@ import java.util.Map;
 /**
  * A {@code gui/*.yml} menu in the EcoMenus dialect: {@code title}, {@code rows}, a {@code mask} where
  * {@code 0} marks dynamic-content slots, and fixed {@code slots} with 1-based {@code row}/{@code column}.
+ * Text keys missing from the server's file (title, entry templates) fall back to the bundled copy;
+ * {@code slots} and {@code pages} never do, so an owner can remove buttons or filler.
  */
 public final class MenuTemplate {
 
@@ -38,9 +40,12 @@ public final class MenuTemplate {
         return source;
     }
 
-    public static MenuTemplate load(File file, String defaultTitle, int defaultRows) {
+    public static MenuTemplate load(File file, YamlConfiguration bundled, int defaultRows) {
         FileConfiguration cfg = YamlConfiguration.loadConfiguration(file);
-        String title = cfg.getString("title", defaultTitle);
+        if (bundled != null) {
+            cfg.setDefaults(bundled);
+        }
+        String title = cfg.getString("title");
         int rows = Math.max(1, Math.min(6, cfg.getInt("rows", defaultRows)));
         int size = rows * 9;
 
@@ -64,7 +69,7 @@ public final class MenuTemplate {
         }
 
         List<MenuSlot> slots = new ArrayList<>();
-        for (Map<?, ?> raw : cfg.getMapList("slots")) {
+        for (Map<?, ?> raw : cfg.isSet("slots") ? cfg.getMapList("slots") : List.<Map<?, ?>>of()) {
             MenuSlot slot = parseSlot(raw, size);
             if (slot != null) {
                 slots.add(slot);
@@ -75,7 +80,7 @@ public final class MenuTemplate {
     }
 
     private static ConfigurationSection firstPageMask(FileConfiguration cfg) {
-        List<Map<?, ?>> pages = cfg.getMapList("pages");
+        List<Map<?, ?>> pages = cfg.isSet("pages") ? cfg.getMapList("pages") : List.of();
         if (pages.isEmpty()) {
             return null;
         }

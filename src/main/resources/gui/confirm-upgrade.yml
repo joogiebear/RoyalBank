@@ -21,6 +21,19 @@ pages:
         - "111111111"
         - "111111111"
 
+# Text on the required-item icons. Placeholders: %amount% (needed), %held% (in the inventory), %id%.
+cost-item:
+  # used when an EcoItems id does not resolve, so a wrong or not-yet-created id is obvious
+  unresolved-name: "&f%id%"
+  unresolved-lore:
+    - "&8(not loaded in eco)"
+  lore-enough:
+    - "&7Required: &f%amount%"
+    - "&aYou have: &f%held%&7/&f%amount%"
+  lore-missing:
+    - "&7Required: &f%amount%"
+    - "&cYou have: &f%held%&7/&f%amount%"
+
 slots:
   - item: book name:"&e&lUpgrade Details"
     lore:
