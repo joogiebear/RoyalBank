@@ -1,3 +1,12 @@
+## 2026.41.0 - 2026-10-10
+
+### Refactors
+- read all player-facing text from config (`8cbe675`)
+- replace the sign input with a native text dialog (`ec2db58`)
+
+### Documentation
+- add AGENTS.md with the suite's development standards (`95a09d6`)
+
 ## 2026.40.1 — 2026-10-03
 
 ### 🐛 Fixes
