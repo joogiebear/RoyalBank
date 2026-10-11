@@ -115,7 +115,8 @@ public final class BankDatabase {
                     balance DOUBLE NOT NULL DEFAULT 0,
                     level INT NOT NULL DEFAULT 1,
                     last_interest_claim BIGINT NOT NULL DEFAULT 0,
-                    bonus_claimed TINYINT NOT NULL DEFAULT 0
+                    bonus_claimed TINYINT NOT NULL DEFAULT 0,
+                    min_balance_since_claim DOUBLE NULL
                 )
                 """ : """
                 CREATE TABLE IF NOT EXISTS player_banks (
@@ -124,7 +125,8 @@ public final class BankDatabase {
                     balance REAL NOT NULL DEFAULT 0,
                     level INTEGER NOT NULL DEFAULT 1,
                     last_interest_claim INTEGER NOT NULL DEFAULT 0,
-                    bonus_claimed INTEGER NOT NULL DEFAULT 0
+                    bonus_claimed INTEGER NOT NULL DEFAULT 0,
+                    min_balance_since_claim REAL
                 )
                 """;
         String transactionsDdl = mysql() ? """
@@ -175,6 +177,39 @@ public final class BankDatabase {
         if (!mysql()) {
             migrateSqlite();
         }
+        addMinBalanceColumn();
+    }
+
+    // NULL means "not known yet" and is filled with the current balance, so an interrupted
+    // migration is finished on the next start
+    private void addMinBalanceColumn() throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement()) {
+            if (!hasColumn(connection, "player_banks", "min_balance_since_claim")) {
+                try {
+                    statement.executeUpdate("ALTER TABLE player_banks ADD COLUMN min_balance_since_claim "
+                            + (mysql() ? "DOUBLE NULL" : "REAL"));
+                    plugin.getLogger().info("Migrated player_banks: added min_balance_since_claim column.");
+                } catch (SQLException exception) {
+                    // another server on the same MySQL database may have added it first
+                    if (!hasColumn(connection, "player_banks", "min_balance_since_claim")) {
+                        throw exception;
+                    }
+                }
+            }
+            statement.executeUpdate("UPDATE player_banks SET min_balance_since_claim = balance WHERE min_balance_since_claim IS NULL");
+        }
+    }
+
+    private static boolean hasColumn(Connection connection, String table, String column) throws SQLException {
+        try (ResultSet columns = connection.getMetaData().getColumns(connection.getCatalog(), null, table, null)) {
+            while (columns.next()) {
+                if (column.equalsIgnoreCase(columns.getString("COLUMN_NAME"))) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // MySQL tables are always created current, only old SQLite files need this
@@ -218,7 +253,8 @@ public final class BankDatabase {
     }
 
     public Optional<BankAccount> getAccount(UUID uuid) {
-        String sql = "SELECT uuid, username, balance, level, last_interest_claim, bonus_claimed FROM player_banks WHERE uuid = ?";
+        String sql = "SELECT uuid, username, balance, level, last_interest_claim, bonus_claimed,"
+                + " COALESCE(min_balance_since_claim, balance) AS min_balance FROM player_banks WHERE uuid = ?";
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, uuid.toString());
@@ -232,7 +268,8 @@ public final class BankDatabase {
                         resultSet.getDouble("balance"),
                         resultSet.getInt("level"),
                         resultSet.getLong("last_interest_claim"),
-                        resultSet.getInt("bonus_claimed") != 0
+                        resultSet.getInt("bonus_claimed") != 0,
+                        resultSet.getDouble("min_balance")
                 ));
             }
         } catch (SQLException exception) {
@@ -321,8 +358,8 @@ public final class BankDatabase {
 
     /** Copies legacy {@code shared_banks} rows into {@code player_banks}. Idempotent. */
     public void migrateSharedAccountsToPlayerBanks(int startingLevel) {
-        String sql = "INSERT INTO player_banks (uuid, username, balance, level, last_interest_claim, bonus_claimed) "
-                + "SELECT id, label, balance, ?, 0, 0 FROM shared_banks "
+        String sql = "INSERT INTO player_banks (uuid, username, balance, level, last_interest_claim, bonus_claimed, min_balance_since_claim) "
+                + "SELECT id, label, balance, ?, 0, 0, balance FROM shared_banks "
                 + "WHERE id NOT IN (SELECT uuid FROM player_banks)";
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -402,23 +439,25 @@ public final class BankDatabase {
 
     private String saveAccountSql() {
         return mysql() ? """
-                INSERT INTO player_banks (uuid, username, balance, level, last_interest_claim, bonus_claimed)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO player_banks (uuid, username, balance, level, last_interest_claim, bonus_claimed, min_balance_since_claim)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE
                     username = VALUES(username),
                     balance = VALUES(balance),
                     level = VALUES(level),
                     last_interest_claim = VALUES(last_interest_claim),
-                    bonus_claimed = VALUES(bonus_claimed)
+                    bonus_claimed = VALUES(bonus_claimed),
+                    min_balance_since_claim = VALUES(min_balance_since_claim)
                 """ : """
-                INSERT INTO player_banks (uuid, username, balance, level, last_interest_claim, bonus_claimed)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO player_banks (uuid, username, balance, level, last_interest_claim, bonus_claimed, min_balance_since_claim)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(uuid) DO UPDATE SET
                     username = excluded.username,
                     balance = excluded.balance,
                     level = excluded.level,
                     last_interest_claim = excluded.last_interest_claim,
-                    bonus_claimed = excluded.bonus_claimed
+                    bonus_claimed = excluded.bonus_claimed,
+                    min_balance_since_claim = excluded.min_balance_since_claim
                 """;
     }
 
@@ -429,6 +468,7 @@ public final class BankDatabase {
         statement.setInt(4, account.level());
         statement.setLong(5, account.lastInterestClaim());
         statement.setInt(6, account.bonusClaimed() ? 1 : 0);
+        statement.setDouble(7, account.minBalanceSinceClaim());
     }
 
     private void bindTransaction(PreparedStatement statement, UUID uuid, String type, double amount, double balanceAfter, String note) throws SQLException {

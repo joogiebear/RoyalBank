@@ -71,8 +71,8 @@ public final class RoyalBankPlaceholderExpansion extends PlaceholderExpansion {
                 case "max_balance_raw" -> String.valueOf(level.maxBalance());
                 case "bank_space" -> bankService.money(bankSpace);
                 case "bank_space_raw" -> String.valueOf(bankSpace);
-                case "next_interest" -> bankService.money(bankService.calculateInterest(account.balance(), level));
-                case "next_interest_raw" -> String.valueOf(bankService.calculateInterest(account.balance(), level));
+                case "next_interest" -> bankService.money(bankService.nextInterest(account, level));
+                case "next_interest_raw" -> String.valueOf(bankService.nextInterest(account, level));
                 case "interest_time" -> bankService.getInterestTimeRemaining(player);
                 case "max_interest" -> bankService.money(level.maxInterest());
                 // Vault read; common providers allow it async, and a failure renders as empty

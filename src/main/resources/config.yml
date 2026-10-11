@@ -10,6 +10,8 @@ settings:
   interest-on-join: true
   interest-command-enabled: true
   # Interest payout cooldown in real hours. Default: 31 hours.
+  # Each claim pays interest on the lowest balance the account held since its previous claim, so money
+  # deposited or transferred in only earns once it has stayed in the bank for a full period.
   interest-cooldown-hours: 31
   pay-interest-to-bank: true
   upgrade-unlock-combined-balance: 10000000.0
