@@ -24,6 +24,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
+import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemFlag;
@@ -50,14 +51,14 @@ public final class BankGui implements Listener {
     private final BankService bankService;
     private final MenuManager menus;
     private final com.mystipixel.royalbank.hooks.EcoHook eco;
-    private final SignInput signInput;
+    private final TextInput textInput;
 
-    public BankGui(RoyalBankPlugin plugin, BankService bankService, SignInput signInput) {
+    public BankGui(RoyalBankPlugin plugin, BankService bankService, TextInput textInput) {
         this.plugin = plugin;
         this.bankService = bankService;
         this.menus = new MenuManager(plugin);
         this.eco = new com.mystipixel.royalbank.hooks.EcoHook();
-        this.signInput = signInput;
+        this.textInput = textInput;
     }
 
     public void reload() {
@@ -275,17 +276,31 @@ public final class BankGui implements Listener {
 
     private void promptForAmount(Player player, String menuId, PendingAmount.Kind kind) {
         playSound(menus.get(menuId), player, "sounds.prompt");
-        boolean deposit = kind == PendingAmount.Kind.DEPOSIT;
-        signInput.request(player,
-                List.of("&8^^^^^^^^^^^^^^^", deposit ? "&8Amount to deposit" : "&8Amount to withdraw",
-                        "&8(or 'cancel')"),
-                typed -> {
-                    // another plugin's menu replaced the prompt; don't reopen the bank over it
-                    if (typed == null && !SignInput.showingOwnInventory(player)) {
-                        return;
-                    }
-                    handleCustomAmount(player, kind, typed == null ? "cancel" : typed.trim());
-                });
+        List<String> title = kind == PendingAmount.Kind.DEPOSIT
+                ? plugin.getMessageManager().lines("input.deposit",
+                        List.of("&fDeposit a custom amount", "&7Shorthand works too (5k, 5m, 5b)."))
+                : plugin.getMessageManager().lines("input.withdraw",
+                        List.of("&fWithdraw a custom amount", "&7Shorthand works too (5k, 5m, 5b)."));
+        textInput.request(player, title, typed -> {
+            if (typed == null) {
+                // nothing was moved; only put the bank back if nothing else has the screen
+                if (canReopen(player)) {
+                    msg(player, "custom-cancelled", "&eCustom bank action cancelled.");
+                    openMain(player);
+                }
+                return;
+            }
+            handleCustomAmount(player, kind, typed);
+        });
+    }
+
+    // after a null answer the player may have quit, died, opened another menu or started a newer prompt
+    private boolean canReopen(Player player) {
+        if (!player.isOnline() || player.isDead() || textInput.isWaiting(player)) {
+            return false;
+        }
+        InventoryType top = player.getOpenInventory().getTopInventory().getType();
+        return top == InventoryType.CRAFTING || top == InventoryType.CREATIVE;
     }
 
     private void handleCustomAmount(Player player, PendingAmount.Kind kind, String message) {

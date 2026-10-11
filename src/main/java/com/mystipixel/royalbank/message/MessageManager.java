@@ -7,6 +7,7 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
+import java.util.List;
 import java.util.Map;
 
 public final class MessageManager {
@@ -38,6 +39,11 @@ public final class MessageManager {
 
     public String raw(String key, String fallback) {
         return messages.getString(key, fallback);
+    }
+
+    public List<String> lines(String key, List<String> fallback) {
+        List<String> value = messages.getStringList(key);
+        return value.isEmpty() ? fallback : value;
     }
 
     public String format(String key, String fallback, Map<String, String> placeholders) {

@@ -5,8 +5,17 @@ reload-success: "&aRoyalBank reloaded. Loaded levels: {levels}"
 unknown-command: "&cUnknown subcommand. Use /bank, /bank deposit, /bank withdraw, /bank upgrade, /bank interest, /bank info, or /bank admin."
 custom-cancelled: "&eCustom bank action cancelled."
 custom-invalid-amount: "&cThat was not a safe valid amount. Use normal numbers only, or type cancel next time."
-prompt-deposit: "&aType the amount you want to deposit in chat. Type &ecancel &ato stop."
-prompt-withdraw: "&cType the amount you want to withdraw in chat. Type &ecancel &cto stop."
+# The custom amount dialog. In each prompt the first line is the dialog title and any further lines
+# are shown under it.
+input:
+  confirm: "&aDone"
+  cancel: "&cCancel"
+  deposit:
+    - "&fDeposit a custom amount"
+    - "&7Shorthand works too (5k, 5m, 5b)."
+  withdraw:
+    - "&fWithdraw a custom amount"
+    - "&7Shorthand works too (5k, 5m, 5b)."
 permission:
   bank: "&cYou do not have permission to use the bank."
   deposit: "&cYou do not have permission to deposit."

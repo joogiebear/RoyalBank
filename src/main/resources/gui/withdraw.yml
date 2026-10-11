@@ -80,7 +80,7 @@ slots:
 
   - item: name_tag name:"&c&lWithdraw Custom"
     lore:
-      - "&7Type an exact amount in chat."
+      - "&7Enter an exact amount."
       - "&7Shorthand works too (5k, 5m, 5b)."
       - ""
       - "&eClick, then type an amount!"
