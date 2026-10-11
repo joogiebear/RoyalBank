@@ -1,3 +1,9 @@
+## 2026.41.2 - 2026-10-11
+
+### Fixes
+- keep coop depositors across restarts (`8ef735a`)
+- pay interest on the lowest balance held since the last claim (`5a69ec3`)
+
 ## 2026.41.1 - 2026-10-11
 
 ### Fixes
