@@ -174,10 +174,22 @@ and add friction (limits/cooldown/tax) to player-to-player transfers in your eco
 
 ## EconGuard integration
 
-If [EconGuard](https://github.com/joogiebear/EconGuard) is installed, RoyalBank reports every deposit,
-withdrawal, transfer, upgrade payment and interest payout to the shared ledger (`bank` source), and
-`/eg history <player>` shows them alongside that player's auction and shop activity. There is nothing
-to enable — the hook is a single `Optional` check, so RoyalBank behaves identically without it.
+If [EconGuard](https://github.com/joogiebear/EconGuard) is installed, RoyalBank reports deposits,
+withdrawals, transfers, coop bank deposits and withdrawals, interest and the first-deposit bonus to the
+shared ledger (`bank` source), and `/eg history <player>` shows them alongside that player's auction and
+shop activity. There is nothing to enable, and RoyalBank behaves identically without it.
+
+How each movement counts in EconGuard's detection:
+
+- Moving your own money between purse and bank (deposit, withdrawal) is not incoming, so it never adds
+  to velocity or the young-account checks.
+- A transfer is incoming for the receiver, with the sender as counterparty.
+- A coop bank withdrawal is split by who paid the money in. Your own deposits coming back are not
+  incoming. Money another member deposited is incoming, with that member as counterparty. Money with no
+  known depositor (paid in before the last restart) is incoming with no counterparty.
+- Interest and the first-deposit bonus are incoming with no counterparty.
+
+A failed report never fails the bank action.
 
 This matters because the bank's own anti-abuse layer (above) can only see money crossing the *bank*.
 EconGuard correlates across every source, which is what catches an RMT chain that launders through an

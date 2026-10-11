@@ -165,7 +165,7 @@ public final class RoyalBankPlugin extends JavaPlugin {
             return;
         }
         try {
-            bankService.setAuditSink(new com.mystipixel.royalbank.hooks.EconGuardAuditSink());
+            bankService.setAuditSink(new com.mystipixel.royalbank.hooks.EconGuardAuditSink(getLogger()));
             getLogger().info("EconGuard detected; reporting bank activity to the central anti-abuse core.");
         } catch (Throwable throwable) {
             getLogger().warning("EconGuard present but its hook failed to load (" + throwable.getMessage()
