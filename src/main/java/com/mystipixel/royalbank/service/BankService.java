@@ -574,11 +574,22 @@ public final class BankService implements Listener, RoyalBankAPI {
         }
 
         BankLevel level = getEffectiveLevel(account.level());
-        double interest = round(calculateInterest(account.balance(), level));
+        double interest = round(nextInterest(account, level));
 
-        // keep the cooldown when nothing is paid, so an auto-claim at join or a no-op claim costs nothing
         if (interest <= 0) {
-            return manual ? OperationResult.success("interest.nothing-earned") : OperationResult.silent();
+            // keep the cooldown when the balance itself earns nothing, so an auto-claim on an empty bank costs nothing
+            if (round(calculateInterest(account.balance(), level)) <= 0) {
+                return manual ? OperationResult.success("interest.nothing-earned") : OperationResult.silent();
+            }
+            // money paid in since the last claim starts a full period now, or claiming twice would pay on it at once
+            BankAccount restarted = account.withInterestClaimed(now);
+            if (!database.saveAccount(restarted)) {
+                return OperationResult.fail("interest.not-saved");
+            }
+            cacheIfOnline(restarted);
+            return manual
+                    ? OperationResult.success("interest.period-started", "time", formatDuration(cooldownSeconds))
+                    : OperationResult.silent();
         }
 
         boolean payToBank = plugin.getConfig().getBoolean("settings.pay-interest-to-bank", true);
@@ -588,7 +599,7 @@ public final class BankService implements Listener, RoyalBankAPI {
             if (actuallyPaid <= 0) {
                 return manual ? OperationResult.success("interest.bank-full") : OperationResult.silent();
             }
-            BankAccount updated = account.withBalance(newBalance).withLastInterestClaim(now);
+            BankAccount updated = account.withBalance(newBalance).withInterestClaimed(now);
             if (!database.saveAccountWithTransaction(updated, "INTEREST", actuallyPaid, newBalance, messages.get("notes.interest"))) {
                 return OperationResult.fail("interest.not-saved");
             }
@@ -602,7 +613,7 @@ public final class BankService implements Listener, RoyalBankAPI {
         if (!response.transactionSuccess()) {
             return OperationResult.fail("interest.failed", "reason", String.valueOf(response.errorMessage));
         }
-        BankAccount updated = account.withLastInterestClaim(now);
+        BankAccount updated = account.withInterestClaimed(now);
         if (!database.saveAccountWithTransaction(updated, "INTEREST", interest, account.balance(), messages.get("notes.interest-to-purse"))) {
             // or the next claim pays the interest twice
             boolean clawedBack = compensateWithdraw(player, interest, "interest payout");
@@ -697,7 +708,7 @@ public final class BankService implements Listener, RoyalBankAPI {
         String note = discarded > 0
                 ? messages.get("notes.admin-set-level-capped", "level_name", bankLevel.name(), "discarded", money(discarded))
                 : messages.get("notes.admin-set-level", "level_name", bankLevel.name());
-        BankAccount updated = new BankAccount(account.uuid(), account.username(), clampedBalance, level, account.lastInterestClaim(), account.bonusClaimed());
+        BankAccount updated = account.withLevel(level).withBalance(clampedBalance);
         if (!database.saveAccountWithTransaction(updated, "ADMIN_LEVEL", discarded, clampedBalance, note)) {
             return OperationResult.fail("admin.result.level-not-saved");
         }
@@ -726,7 +737,7 @@ public final class BankService implements Listener, RoyalBankAPI {
                 "balance", money(account.balance()),
                 "max_balance", money(level.maxBalance()),
                 "max_interest", money(level.maxInterest()),
-                "next_interest", money(calculateInterest(account.balance(), level)));
+                "next_interest", money(nextInterest(account, level)));
     }
 
     public List<String> describeNextUpgrade(Player player) {
@@ -800,6 +811,11 @@ public final class BankService implements Listener, RoyalBankAPI {
             return messages.get("format.ready-now");
         }
         return formatDuration(nextAllowed - now);
+    }
+
+    // what the next claim pays: interest on the lowest balance held since the last claim
+    public double nextInterest(BankAccount account, BankLevel level) {
+        return calculateInterest(account.minBalanceSinceClaim(), level);
     }
 
     public double calculateInterest(double balance, BankLevel level) {

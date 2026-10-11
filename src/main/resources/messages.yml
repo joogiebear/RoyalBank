@@ -133,6 +133,9 @@ interest:
   disabled: "&cManual interest claiming is disabled."
   cooldown: "&eYou can claim interest again in {time}."
   nothing-earned: "&eNo interest was earned because your bank balance is empty."
+  # Interest is paid on the lowest balance held since the last claim. Shown when that was nothing but the
+  # bank now holds money: the money starts earning from this claim.
+  period-started: "&eNo interest this time: money has to stay in the bank for a full period to earn. Claim again in {time}."
   bank-full: "&eYour bank is full, so no interest could be deposited."
   not-saved: "&cInterest could not be saved; please try again."
   paid-to-bank: "&aDaily interest paid to your bank: &e{amount}"

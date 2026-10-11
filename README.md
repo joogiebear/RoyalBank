@@ -127,6 +127,14 @@ If PlaceholderAPI is installed, RoyalBank registers these placeholders:
   `settings.interest-on-join` is true) and via `/bank interest` or the GUI button, subject to
   `settings.interest-cooldown-hours`. The cooldown is only consumed when interest is actually paid,
   so an empty or full bank does not "waste" a claim.
+- Interest is paid on the **lowest balance the account held since its last claim**, not the balance
+  at the moment of the claim. Withdrawals and transfers out lower that amount straight away; deposits
+  and transfers in only count once the next claim has passed. A player who leaves the same balance
+  in the bank earns exactly as before. Money moved in just before a claim earns nothing, so passing
+  one bankroll between accounts, or depositing just before a claim and withdrawing after, no longer
+  earns extra interest. When the lowest balance earned nothing but the bank now holds money, the
+  claim starts a new period for that money and uses up the cooldown. A RoyalSkyblock profile switch
+  sets the lowest balance to the switched-in balance.
 - `settings.max-daily-interest.amount` caps each claim; the cooldown governs how often a claim can
   happen. Set the amount negative for no global cap. A per-level `max-interest` of `0` disables
   interest for that tier; a negative value means no per-level cap.

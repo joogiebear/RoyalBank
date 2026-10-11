@@ -388,7 +388,7 @@ public final class BankGui implements Listener {
         map.put("twenty_balance", bankService.money(account.balance() * 0.20));
         map.put("account_level", String.valueOf(level.level()));
         map.put("account_name", level.name());
-        map.put("next_interest", bankService.money(bankService.calculateInterest(account.balance(), level)));
+        map.put("next_interest", bankService.money(bankService.nextInterest(account, level)));
         map.put("interest_time", bankService.getInterestTimeRemaining(player));
         map.put("max_interest", bankService.money(level.maxInterest()));
         map.put("upgrade_unlock_balance", bankService.money(bankService.getUpgradeUnlockCombinedBalance()));
