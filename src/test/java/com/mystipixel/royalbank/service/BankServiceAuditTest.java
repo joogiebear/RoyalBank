@@ -80,6 +80,7 @@ class BankServiceAuditTest {
         when(economy.depositPlayer(any(OfflinePlayer.class), anyDouble()))
                 .thenAnswer(i -> new EconomyResponse(i.getArgument(1), 0.0, EconomyResponse.ResponseType.SUCCESS, null));
         when(database.saveAccountWithTransaction(any(), anyString(), anyDouble(), anyDouble(), any())).thenReturn(true);
+        when(database.saveCoopMovement(any(), anyString(), anyDouble(), anyDouble(), any(), any())).thenReturn(true);
         when(database.saveTransfer(any(), any(), anyDouble(), anyString(), any(), anyString(), any())).thenReturn(true);
         VaultHook vault = mock(VaultHook.class);
         when(vault.getEconomy()).thenReturn(economy);
@@ -178,6 +179,26 @@ class BankServiceAuditTest {
         assertNull(service.accountWithdraw(main, coop, "Coop", 200.0));
 
         assertEquals(List.of(new Event(main.getUniqueId(), "coop-withdrew-untracked", 200.0, true, null, null)), events);
+    }
+
+    @Test
+    void aCoopWithdrawalThatIsNotSavedKeepsItsDepositors() {
+        UUID coop = UUID.randomUUID();
+        Player alt = player("Alt", 0.0);
+        Player main = player("Main", 0.0);
+        coopBalance(coop, 0.0);
+        assertNull(service.accountDeposit(alt, coop, "Coop", 300.0));
+        coopBalance(coop, 300.0);
+
+        when(database.saveCoopMovement(any(), eq("COOP_WITHDRAW"), anyDouble(), anyDouble(), any(), any())).thenReturn(false);
+        assertEquals("&cWithdrawal could not be saved and was reverted; please try again.",
+                service.accountWithdraw(main, coop, "Coop", 300.0));
+        when(database.saveCoopMovement(any(), eq("COOP_WITHDRAW"), anyDouble(), anyDouble(), any(), any())).thenReturn(true);
+        assertNull(service.accountWithdraw(main, coop, "Coop", 300.0));
+
+        assertEquals(List.of(
+                new Event(alt.getUniqueId(), "coop-deposited", 300.0, false, null, null),
+                new Event(main.getUniqueId(), "coop-received", 300.0, true, alt.getUniqueId(), "Alt")), events);
     }
 
     @Test

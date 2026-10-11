@@ -1,16 +1,17 @@
 package com.mystipixel.royalbank.service;
 
+import com.mystipixel.royalbank.data.CoopContribution;
+
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 // Who paid into each shared account and has not taken it back yet, so a withdrawal can be reported
-// against the members who funded it. Memory only: money deposited before a restart has no known depositor.
-// Main thread only.
+// against the members who funded it. A copy of the coop_contributions table: callers write the table
+// in the same transaction as the money, then apply the same change here. Main thread only.
 final class CoopContributions {
 
     // depositor null: no known depositor for this part of the withdrawal
@@ -20,9 +21,27 @@ final class CoopContributions {
     private record Deposit(String name, double amount) {
     }
 
-    private static final double EPSILON = 1e-6;
+    static final double EPSILON = 1e-6;
 
     private final Map<UUID, LinkedHashMap<UUID, Deposit>> byAccount = new HashMap<>();
+    private long nextSeq = 1;
+
+    // rows in table order: by account, then by seq
+    void load(List<CoopContribution> rows) {
+        byAccount.clear();
+        nextSeq = 1;
+        for (CoopContribution row : rows) {
+            if (row.amount() > EPSILON) {
+                byAccount.computeIfAbsent(row.account(), k -> new LinkedHashMap<>())
+                        .put(row.member(), new Deposit(row.memberName(), row.amount()));
+            }
+            nextSeq = Math.max(nextSeq, row.seq() + 1);
+        }
+    }
+
+    CoopContribution depositChange(UUID account, UUID depositor, String depositorName, double amount) {
+        return new CoopContribution(account, depositor, depositorName, amount, nextSeq++);
+    }
 
     void deposited(UUID account, UUID depositor, String depositorName, double amount) {
         if (amount <= 0.0) {
@@ -33,25 +52,58 @@ final class CoopContributions {
                         (old, added) -> new Deposit(added.name(), old.amount() + added.amount()));
     }
 
-    // The withdrawer's own deposits are used first, then other members' in the order they first paid in.
-    List<Share> withdrawn(UUID account, UUID withdrawer, double amount) {
+    // Read-only. The withdrawer's own deposits are used first, then other members' in the order they first paid in.
+    List<Share> shares(UUID account, UUID withdrawer, double amount) {
         List<Share> shares = new ArrayList<>();
         double remaining = amount;
         LinkedHashMap<UUID, Deposit> deposits = byAccount.get(account);
         if (deposits != null) {
             remaining = take(deposits, withdrawer, remaining, shares);
-            Iterator<UUID> others = new ArrayList<>(deposits.keySet()).iterator();
-            while (remaining > EPSILON && others.hasNext()) {
-                remaining = take(deposits, others.next(), remaining, shares);
-            }
-            if (deposits.isEmpty()) {
-                byAccount.remove(account);
+            for (UUID other : deposits.keySet()) {
+                if (remaining <= EPSILON) {
+                    break;
+                }
+                if (!other.equals(withdrawer)) {
+                    remaining = take(deposits, other, remaining, shares);
+                }
             }
         }
         if (remaining > EPSILON) {
             shares.add(new Share(null, null, remaining));
         }
         return shares;
+    }
+
+    static List<CoopContribution> withdrawalChanges(UUID account, List<Share> shares) {
+        List<CoopContribution> changes = new ArrayList<>();
+        for (Share share : shares) {
+            if (share.depositor() != null) {
+                changes.add(new CoopContribution(account, share.depositor(), share.depositorName(), -share.amount(), 0L));
+            }
+        }
+        return changes;
+    }
+
+    void withdrawn(UUID account, List<Share> shares) {
+        LinkedHashMap<UUID, Deposit> deposits = byAccount.get(account);
+        if (deposits == null) {
+            return;
+        }
+        for (Share share : shares) {
+            if (share.depositor() == null) {
+                continue;
+            }
+            Deposit deposit = deposits.get(share.depositor());
+            double left = deposit == null ? 0.0 : deposit.amount() - share.amount();
+            if (left > EPSILON) {
+                deposits.put(share.depositor(), new Deposit(deposit.name(), left));
+            } else {
+                deposits.remove(share.depositor());
+            }
+        }
+        if (deposits.isEmpty()) {
+            byAccount.remove(account);
+        }
     }
 
     private static double take(Map<UUID, Deposit> deposits, UUID depositor, double remaining, List<Share> shares) {
@@ -61,12 +113,6 @@ final class CoopContributions {
         }
         double taken = Math.min(remaining, deposit.amount());
         shares.add(new Share(depositor, deposit.name(), taken));
-        double left = deposit.amount() - taken;
-        if (left > EPSILON) {
-            deposits.put(depositor, new Deposit(deposit.name(), left));
-        } else {
-            deposits.remove(depositor);
-        }
         return remaining - taken;
     }
 }

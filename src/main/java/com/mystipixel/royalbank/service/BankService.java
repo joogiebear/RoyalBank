@@ -13,6 +13,7 @@ import com.mystipixel.royalbank.config.RequirementType;
 import com.mystipixel.royalbank.data.BankAccount;
 import com.mystipixel.royalbank.data.BankDatabase;
 import com.mystipixel.royalbank.data.BankTransaction;
+import com.mystipixel.royalbank.data.CoopContribution;
 import com.mystipixel.royalbank.hooks.VaultHook;
 import com.mystipixel.royalbank.message.MessageManager;
 import com.mystipixel.royalbank.security.AbuseMonitor;
@@ -422,8 +423,9 @@ public final class BankService implements Listener, RoyalBankAPI {
         if (!response.transactionSuccess()) {
             return OperationResult.fail("deposit.failed", "reason", String.valueOf(response.errorMessage));
         }
-        if (!database.saveAccountWithTransaction(account.withBalance(principal), "COOP_DEPOSIT", charge, principal,
-                messages.get("notes.account-deposit", "player", purse.getName()))) {
+        CoopContribution contribution = coopContributions.depositChange(accountId, purse.getUniqueId(), purse.getName(), charge);
+        if (!database.saveCoopMovement(account.withBalance(principal), "COOP_DEPOSIT", charge, principal,
+                messages.get("notes.account-deposit", "player", purse.getName()), List.of(contribution))) {
             compensateDeposit(purse, charge, "account deposit");
             return OperationResult.fail("account.deposit.refunded");
         }
@@ -447,20 +449,28 @@ public final class BankService implements Listener, RoyalBankAPI {
             return OperationResult.fail("withdraw.failed", "reason", String.valueOf(response.errorMessage));
         }
         double newBalance = round(account.balance() - amount);
-        if (!database.saveAccountWithTransaction(account.withBalance(newBalance), "COOP_WITHDRAW", amount, newBalance,
-                messages.get("notes.account-withdraw", "player", purse.getName()))) {
+        List<CoopContributions.Share> shares = coopContributions.shares(accountId, purse.getUniqueId(), amount);
+        if (!database.saveCoopMovement(account.withBalance(newBalance), "COOP_WITHDRAW", amount, newBalance,
+                messages.get("notes.account-withdraw", "player", purse.getName()),
+                CoopContributions.withdrawalChanges(accountId, shares))) {
             compensateWithdraw(purse, amount, "account withdrawal");
             return OperationResult.fail("withdraw.reverted");
         }
-        reportCoopWithdrawal(purse, accountId, amount, account.balance());
+        coopContributions.withdrawn(accountId, shares);
+        reportCoopWithdrawal(purse, shares, account.balance());
         return OperationResult.silent();
+    }
+
+    // startup only, before any coop movement
+    public void loadCoopContributions() {
+        coopContributions.load(database.loadCoopContributions());
     }
 
     // Money a member paid in and takes back is an internal move. Money another member paid in is
     // incoming from that member, and money with no known depositor is incoming with no counterparty.
-    private void reportCoopWithdrawal(Player purse, UUID accountId, double amount, double oldBalance) {
+    private void reportCoopWithdrawal(Player purse, List<CoopContributions.Share> shares, double oldBalance) {
         double balance = oldBalance;
-        for (CoopContributions.Share share : coopContributions.withdrawn(accountId, purse.getUniqueId(), amount)) {
+        for (CoopContributions.Share share : shares) {
             double after = round(balance - share.amount());
             if (purse.getUniqueId().equals(share.depositor())) {
                 report(purse.getUniqueId(), purse.getName(), "coop-withdrew", share.amount(), balance, after, false, null, null);

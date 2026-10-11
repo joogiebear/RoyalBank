@@ -145,7 +145,7 @@ class BankServiceTextTest {
         when(database.getAccount(coop)).thenReturn(Optional.of(new BankAccount(coop, "Coop", 500.0, 1, 0L, false)));
         when(economy.depositPlayer(player, 100.0))
                 .thenReturn(new EconomyResponse(100.0, 0.0, EconomyResponse.ResponseType.SUCCESS, null));
-        when(database.saveAccountWithTransaction(any(), eq("COOP_WITHDRAW"), anyDouble(), anyDouble(), eq("Steve withdrew")))
+        when(database.saveCoopMovement(any(), eq("COOP_WITHDRAW"), anyDouble(), anyDouble(), eq("Steve withdrew"), any()))
                 .thenReturn(true);
         assertNull(service.accountWithdraw(player, coop, "Coop", 100.0));
         assertEquals("64x Gold Block", service.getUpgradeView(coop, "Coop").itemsText());

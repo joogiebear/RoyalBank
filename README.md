@@ -185,8 +185,9 @@ How each movement counts in EconGuard's detection:
   to velocity or the young-account checks.
 - A transfer is incoming for the receiver, with the sender as counterparty.
 - A coop bank withdrawal is split by who paid the money in. Your own deposits coming back are not
-  incoming. Money another member deposited is incoming, with that member as counterparty. Money with no
-  known depositor (paid in before the last restart) is incoming with no counterparty.
+  incoming. Money another member deposited is incoming, with that member as counterparty. Who paid in
+  what is stored in the `coop_contributions` table, so this survives restarts. Money with no known
+  depositor (paid in before RoyalBank started recording depositors) is incoming with no counterparty.
 - Interest and the first-deposit bonus are incoming with no counterparty.
 
 A failed report never fails the bank action.
