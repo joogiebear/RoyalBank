@@ -2,13 +2,13 @@ package com.mystipixel.royalbank.command;
 
 import com.mystipixel.royalbank.RoyalBankPlugin;
 import com.mystipixel.royalbank.config.LevelManager;
-import com.mystipixel.royalbank.data.BankAccount;
 import com.mystipixel.royalbank.data.BankTransaction;
 import com.mystipixel.royalbank.gui.BankGui;
 import com.mystipixel.royalbank.message.MessageManager;
 import com.mystipixel.royalbank.security.AbuseMonitor;
 import com.mystipixel.royalbank.service.BalanceRefresher;
 import com.mystipixel.royalbank.service.BankService;
+import com.mystipixel.royalbank.service.OperationResult;
 import com.mystipixel.royalbank.util.Amounts;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
@@ -29,6 +29,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
 public final class BankCommand implements CommandExecutor, TabCompleter {
@@ -102,7 +103,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     private void withFreshAccount(Player player, Runnable show) {
         BalanceRefresher refresher = plugin.getBalanceRefresher();
         if (refresher == null) {
-            show.run();
+            bankService.ensureLoaded(player, show);
         } else {
             refresher.refresh(player, show);
         }
@@ -153,7 +154,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         if (amount == null) {
             return;
         }
-        messages.sendResult(player, bankService.deposit(player, amount));
+        reply(player, bankService.deposit(player, amount));
     }
 
     private void handleWithdraw(Player player, String[] args) {
@@ -165,11 +166,11 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         if (amount == null) {
             return;
         }
-        messages.sendResult(player, bankService.withdraw(player, amount));
+        reply(player, bankService.withdraw(player, amount));
     }
 
     private void handleInterest(Player player) {
-        messages.sendResult(player, bankService.claimInterest(player, true));
+        reply(player, bankService.claimInterest(player, true));
     }
 
     private void handleTransfer(Player player, String[] args) {
@@ -214,7 +215,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             messages.send(player, "transfer.confirm-hint", "seconds", String.valueOf(confirmTimeoutSeconds()));
             return;
         }
-        messages.sendResult(player, bankService.transfer(player, target, amount));
+        reply(player, bankService.transfer(player, target, amount));
     }
 
     private void confirmTransfer(Player player) {
@@ -228,7 +229,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             return;
         }
         // full transfer path again so balance and cap are re-validated at confirm time
-        messages.sendResult(player, bankService.transfer(player, Bukkit.getOfflinePlayer(pending.recipient()), pending.amount()));
+        reply(player, bankService.transfer(player, Bukkit.getOfflinePlayer(pending.recipient()), pending.amount()));
     }
 
     private long confirmTimeoutSeconds() {
@@ -248,11 +249,10 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         if (target == null) {
             return;
         }
-        BankAccount account = plugin.getDatabase().getOrCreateAccount(target, levelManager.getStartingLevel());
-        messages.send(sender, "admin.balance-line",
+        bankService.adminAccount(target).thenAccept(account -> messages.send(sender, "admin.balance-line",
                 "player", String.valueOf(account.username()),
                 "balance", bankService.money(account.balance()),
-                "level", String.valueOf(account.level()));
+                "level", String.valueOf(account.level())));
     }
 
     private void handleAdminSetBalance(CommandSender sender, String[] args) {
@@ -261,7 +261,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         if (target == null || amount == null) {
             return;
         }
-        messages.sendResult(sender, bankService.setBalance(target, amount));
+        reply(sender, bankService.setBalance(target, amount));
     }
 
     private void handleAdminAddBalance(CommandSender sender, String[] args) {
@@ -270,7 +270,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         if (target == null || amount == null) {
             return;
         }
-        messages.sendResult(sender, bankService.addBalance(target, amount));
+        reply(sender, bankService.addBalance(target, amount));
     }
 
     private void handleAdminRemoveBalance(CommandSender sender, String[] args) {
@@ -279,7 +279,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         if (target == null || amount == null) {
             return;
         }
-        messages.sendResult(sender, bankService.removeBalance(target, amount));
+        reply(sender, bankService.removeBalance(target, amount));
     }
 
     private void handleAdminSetLevel(CommandSender sender, String[] args) {
@@ -292,7 +292,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             return;
         }
         try {
-            messages.sendResult(sender, bankService.setLevel(target, Integer.parseInt(args[3])));
+            reply(sender, bankService.setLevel(target, Integer.parseInt(args[3])));
         } catch (NumberFormatException exception) {
             messages.send(sender, "admin.level-number");
         }
@@ -303,7 +303,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         if (target == null) {
             return;
         }
-        messages.sendResult(sender, bankService.resetAccount(target));
+        reply(sender, bankService.resetAccount(target));
     }
 
     private void handleAdminTransactions(CommandSender sender, String[] args) {
@@ -311,7 +311,11 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         if (target == null) {
             return;
         }
-        List<BankTransaction> transactions = plugin.getDatabase().getRecentTransactions(target.getUniqueId(), 10);
+        bankService.getRecentTransactions(target.getUniqueId(), 10)
+                .thenAccept(transactions -> sendTransactions(sender, target, transactions));
+    }
+
+    private void sendTransactions(CommandSender sender, OfflinePlayer target, List<BankTransaction> transactions) {
         if (transactions.isEmpty()) {
             messages.send(sender, "admin.transactions-empty", "player", String.valueOf(target.getName()));
             return;
@@ -366,17 +370,19 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         }
 
         File backupFile = new File(backupFolder, "bank-" + BACKUP_TIME.format(Instant.now()) + "-" + System.currentTimeMillis() + ".db");
-        // VACUUM INTO can take a while on a large database
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-            boolean ok = plugin.getDatabase().backupTo(backupFile.toPath());
-            Bukkit.getScheduler().runTask(plugin, () -> {
-                if (ok) {
-                    messages.send(sender, "admin.backup-success", "path", backupFile.getAbsolutePath());
-                } else {
-                    messages.send(sender, "admin.backup-failed");
-                }
-            });
+        // VACUUM INTO can take a while on a large database; bank actions queue behind it meanwhile
+        bankService.backup(backupFile.toPath()).thenAccept(ok -> {
+            if (ok) {
+                messages.send(sender, "admin.backup-success", "path", backupFile.getAbsolutePath());
+            } else {
+                messages.send(sender, "admin.backup-failed");
+            }
         });
+    }
+
+    // the result arrives on the main thread a tick or two later, or at once when nothing reached the database
+    private void reply(CommandSender sender, CompletableFuture<OperationResult> result) {
+        result.thenAccept(outcome -> messages.sendResult(sender, outcome));
     }
 
     private OfflinePlayer target(CommandSender sender, String[] args, int index) {

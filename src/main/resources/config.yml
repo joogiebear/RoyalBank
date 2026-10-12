@@ -42,7 +42,7 @@ transactions:
   prune-on-startup: true
 
 # Storage backend. SQLITE (default, one server) or MYSQL. Several servers can share one MySQL database.
-# Database work still runs on the main thread; moving it off is planned for a later release.
+# Database work runs on its own thread, so a slow database never freezes the server.
 storage:
   type: SQLITE
   sqlite-file: "bank.db"

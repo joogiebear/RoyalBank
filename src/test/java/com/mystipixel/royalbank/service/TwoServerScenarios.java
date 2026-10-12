@@ -9,7 +9,6 @@ import com.mystipixel.royalbank.hooks.VaultHook;
 import com.mystipixel.royalbank.message.MessageManager;
 import com.mystipixel.royalbank.message.TestMessages;
 import com.mystipixel.royalcommon.storage.DbExecutor;
-import com.mystipixel.royalcommon.storage.MainThread;
 import net.milkbowl.vault.economy.Economy;
 import net.milkbowl.vault.economy.EconomyResponse;
 import org.bukkit.Bukkit;
@@ -99,8 +98,8 @@ abstract class TwoServerScenarios {
     @AfterEach
     void stopServers() throws Exception {
         threads.shutdownNow();
-        a.db.shutdown(java.time.Duration.ofSeconds(10));
-        b.db.shutdown(java.time.Duration.ofSeconds(10));
+        a.threads.shutdown();
+        b.threads.shutdown();
         a.database.close();
         b.database.close();
         bukkit.close();
@@ -111,7 +110,8 @@ abstract class TwoServerScenarios {
         final BankDatabase database;
         final BankService service;
         final YamlConfiguration config;
-        final MainQueue main = new MainQueue();
+        final TestThreads threads;
+        final MainQueue main;
         final DbExecutor db;
         final BalanceRefresher refresher;
 
@@ -138,7 +138,10 @@ abstract class TwoServerScenarios {
             when(levels.getStartingLevel()).thenReturn(1);
             VaultHook vault = mock(VaultHook.class);
             when(vault.getEconomy()).thenReturn(wallets.economy);
-            service = new BankService(plugin, database, levels, vault, messages);
+            threads = new TestThreads("Bank-" + name);
+            main = threads.main;
+            db = threads.db;
+            service = new BankService(plugin, database, levels, vault, messages, db);
             service.setAuditSink((uuid, username, action, amount, oldBalance, newBalance, incoming, counterparty, counterpartyName) -> {
                 if (action.startsWith("interest")) {
                     interestPaid.add(amount);
@@ -147,7 +150,6 @@ abstract class TwoServerScenarios {
                     coopEvents.add(username + " " + action + " " + amount + (counterpartyName == null ? "" : " from " + counterpartyName));
                 }
             });
-            db = new DbExecutor("Bank-" + name, main, Logger.getLogger("TwoServers-" + name));
             refresher = new BalanceRefresher(service.accountCache(), database, db);
         }
 
@@ -158,11 +160,12 @@ abstract class TwoServerScenarios {
             return changed;
         }
 
-        // waits for queued database work and runs what it handed to the main thread, until both are idle
         void settle() {
-            do {
-                db.submit("settle", () -> null).join();
-            } while (main.drain());
+            threads.settle();
+        }
+
+        <T> T run(java.util.concurrent.CompletableFuture<T> action) {
+            return threads.run(action);
         }
 
         double cachedBalance(Player player) {
@@ -171,26 +174,6 @@ abstract class TwoServerScenarios {
 
         BankAccount stored(UUID id) {
             return database.getAccount(id).orElseThrow();
-        }
-    }
-
-    // the server's main thread: work handed to it waits here until the test thread runs it
-    static final class MainQueue implements MainThread {
-        private final java.util.concurrent.LinkedBlockingQueue<Runnable> tasks = new java.util.concurrent.LinkedBlockingQueue<>();
-
-        @Override
-        public void execute(Runnable task) {
-            tasks.add(task);
-        }
-
-        boolean drain() {
-            boolean ran = false;
-            Runnable task;
-            while ((task = tasks.poll()) != null) {
-                task.run();
-                ran = true;
-            }
-            return ran;
         }
     }
 
@@ -306,10 +289,10 @@ abstract class TwoServerScenarios {
         Player sender = account("Sender", 1_000.0);
         Player steve = account("Steve", 100.0);
         wallets.set(steve.getUniqueId(), 50.0);
-        b.service.loadAccount(steve);
+        b.run(b.service.loadAccount(steve));
 
-        assertTrue(a.service.transfer(sender, steve, 500.0).success());
-        assertTrue(b.service.deposit(steve, 10.0).success());
+        assertTrue(a.run(a.service.transfer(sender, steve, 500.0)).success());
+        assertTrue(b.run(b.service.deposit(steve, 10.0)).success());
 
         assertEquals(610.0, a.stored(steve.getUniqueId()).balance(), 1e-9, "the transfer made on A is kept");
         assertEquals(500.0, a.stored(sender.getUniqueId()).balance(), 1e-9);
@@ -319,10 +302,10 @@ abstract class TwoServerScenarios {
     void anAdminAddOnOneServerSurvivesADepositOnTheOther() {
         Player steve = account("Steve", 100.0);
         wallets.set(steve.getUniqueId(), 50.0);
-        b.service.loadAccount(steve);
+        b.run(b.service.loadAccount(steve));
 
-        assertTrue(a.service.addBalance(steve, 1_000.0).success());
-        assertTrue(b.service.deposit(steve, 10.0).success());
+        assertTrue(a.run(a.service.addBalance(steve, 1_000.0)).success());
+        assertTrue(b.run(b.service.deposit(steve, 10.0)).success());
 
         assertEquals(1_110.0, a.stored(steve.getUniqueId()).balance(), 1e-9);
     }
@@ -381,10 +364,10 @@ abstract class TwoServerScenarios {
     void anUpgradeOnOneServerKeepsADepositMadeOnTheOther() {
         Player steve = account("Steve", 100.0);
         wallets.set(steve.getUniqueId(), 10_000.0);
-        a.service.loadAccount(steve);
+        a.run(a.service.loadAccount(steve));
 
-        assertTrue(b.service.deposit(steve, 5_000.0).success());
-        assertTrue(a.service.upgrade(steve).success());
+        assertTrue(b.run(b.service.deposit(steve, 5_000.0)).success());
+        assertTrue(a.run(a.service.upgrade(steve)).success());
 
         BankAccount stored = a.stored(steve.getUniqueId());
         assertEquals(2, stored.level());
@@ -396,18 +379,18 @@ abstract class TwoServerScenarios {
     void anUpgradeRacingDepositsLosesNothing() throws Exception {
         Player steve = account("Steve", 100.0);
         wallets.set(steve.getUniqueId(), 100_000.0);
-        a.service.loadAccount(steve);
-        b.service.loadAccount(steve);
+        a.run(a.service.loadAccount(steve));
+        b.run(b.service.loadAccount(steve));
 
         together(() -> {
             for (int i = 0; i < 20; i++) {
-                if (a.service.upgrade(steve).success()) {
+                if (a.run(a.service.upgrade(steve)).success()) {
                     break;
                 }
             }
         }, () -> {
             for (int i = 0; i < 40; i++) {
-                assertTrue(b.service.deposit(steve, 100.0).success());
+                assertTrue(b.run(b.service.deposit(steve, 100.0)).success());
             }
         });
 
@@ -420,11 +403,11 @@ abstract class TwoServerScenarios {
     @Test
     void interestClaimedOnBothServersIsPaidOnce() {
         Player steve = account("Steve", 1_000_000.0);
-        a.service.loadAccount(steve);
-        b.service.loadAccount(steve);
+        a.run(a.service.loadAccount(steve));
+        b.run(b.service.loadAccount(steve));
 
-        assertTrue(a.service.claimInterest(steve, true).success());
-        assertEquals("interest.cooldown", b.service.claimInterest(steve, true).key());
+        assertTrue(a.run(a.service.claimInterest(steve, true)).success());
+        assertEquals("interest.cooldown", b.run(b.service.claimInterest(steve, true)).key());
 
         assertEquals(List.of(20_000.0), interestPaid);
         assertEquals(1_020_000.0, a.stored(steve.getUniqueId()).balance(), 1e-9);
@@ -434,11 +417,11 @@ abstract class TwoServerScenarios {
     void interestOnOneServerSurvivesATransferOnTheOther() {
         Player steve = account("Steve", 1_000_000.0);
         Player alex = account("Alex", 0.0);
-        a.service.loadAccount(steve);
-        b.service.loadAccount(steve);
+        a.run(a.service.loadAccount(steve));
+        b.run(b.service.loadAccount(steve));
 
-        assertTrue(a.service.claimInterest(steve, true).success());
-        assertTrue(b.service.transfer(steve, alex, 1_000_000.0).success());
+        assertTrue(a.run(a.service.claimInterest(steve, true)).success());
+        assertTrue(b.run(b.service.transfer(steve, alex, 1_000_000.0)).success());
 
         assertEquals(20_000.0, a.stored(steve.getUniqueId()).balance(), 1e-9, "the interest is still there");
         assertEquals(1_000_000.0, a.stored(alex.getUniqueId()).balance(), 1e-9);
@@ -448,17 +431,17 @@ abstract class TwoServerScenarios {
     void interestRacingTransfersIsPaidOnceAndLosesNothing() throws Exception {
         Player steve = account("Steve", 1_000_000.0);
         Player alex = account("Alex", 0.0);
-        a.service.loadAccount(steve);
-        b.service.loadAccount(steve);
+        a.run(a.service.loadAccount(steve));
+        b.run(b.service.loadAccount(steve));
 
         together(() -> {
             for (int i = 0; i < 20; i++) {
-                a.service.claimInterest(steve, true);
+                a.run(a.service.claimInterest(steve, true));
             }
         }, () -> {
             for (int i = 0; i < 20; i++) {
-                b.service.claimInterest(steve, true);
-                assertTrue(b.service.transfer(steve, alex, 1_000.0).success());
+                b.run(b.service.claimInterest(steve, true));
+                assertTrue(b.run(b.service.transfer(steve, alex, 1_000.0)).success());
             }
         });
 
@@ -480,12 +463,12 @@ abstract class TwoServerScenarios {
         // the transfer on A lands while B is creating the account on first join
         when(newbieOnB.getName()).thenAnswer(i -> {
             if (nameReads.getAndIncrement() == 0) {
-                assertTrue(a.service.transfer(sender, newbieOnA, 500.0).success());
+                assertTrue(a.run(a.service.transfer(sender, newbieOnA, 500.0)).success());
             }
             return "Newbie";
         });
 
-        b.service.loadAccount(newbieOnB);
+        b.run(b.service.loadAccount(newbieOnB));
 
         assertEquals(500.0, a.stored(newbieId).balance(), 1e-9, "the transfer is not overwritten by the new account");
         assertEquals(500.0, a.stored(sender.getUniqueId()).balance(), 1e-9);
@@ -501,11 +484,11 @@ abstract class TwoServerScenarios {
 
         together(() -> {
             for (UUID id : newbies) {
-                assertTrue(a.service.transfer(sender, player(id, "N" + id.toString().substring(0, 8)), 100.0).success());
+                assertTrue(a.run(a.service.transfer(sender, player(id, "N" + id.toString().substring(0, 8)), 100.0)).success());
             }
         }, () -> {
             for (UUID id : newbies) {
-                b.service.loadAccount(player(id, "N" + id.toString().substring(0, 8)));
+                b.run(b.service.loadAccount(player(id, "N" + id.toString().substring(0, 8))));
             }
         });
 
@@ -519,8 +502,8 @@ abstract class TwoServerScenarios {
     void depositsAndWithdrawalsOnBothServersAddUp() throws Exception {
         Player steve = account("Steve", 0.0);
         wallets.set(steve.getUniqueId(), 100_000.0);
-        a.service.loadAccount(steve);
-        b.service.loadAccount(steve);
+        a.run(a.service.loadAccount(steve));
+        b.run(b.service.loadAccount(steve));
 
         together(() -> personalTraffic(a, steve, 7), () -> personalTraffic(b, steve, 8));
 
@@ -532,9 +515,9 @@ abstract class TwoServerScenarios {
         for (int i = 0; i < 80; i++) {
             double amount = 10 + random.nextInt(500);
             if (i % 3 == 2) {
-                server.service.withdraw(player, amount);
+                server.run(server.service.withdraw(player, amount));
             } else {
-                server.service.deposit(player, amount);
+                server.run(server.service.deposit(player, amount));
             }
         }
     }
@@ -544,12 +527,12 @@ abstract class TwoServerScenarios {
         Player sender = account("Sender", 1_000.0);
         Player steve = account("Steve", 100.0);
         Player bystander = account("Bystander", 50.0);
-        a.service.loadAccount(steve);
-        a.service.loadAccount(bystander);
-        b.service.loadAccount(sender);
+        a.run(a.service.loadAccount(steve));
+        a.run(a.service.loadAccount(bystander));
+        b.run(b.service.loadAccount(sender));
         assertEquals(Set.of(), a.poll(), "nothing changed yet");
 
-        assertTrue(b.service.transfer(sender, steve, 500.0).success());
+        assertTrue(b.run(b.service.transfer(sender, steve, 500.0)).success());
         assertEquals(100.0, a.cachedBalance(steve), 1e-9, "A has not polled yet");
 
         assertEquals(Set.of(steve.getUniqueId()), a.poll(), "only the changed row is reloaded");
@@ -561,11 +544,11 @@ abstract class TwoServerScenarios {
     @Test
     void anAdminChangeOnTheOtherServerShowsInTheCacheAfterOnePoll() {
         Player steve = account("Steve", 100.0);
-        a.service.loadAccount(steve);
+        a.run(a.service.loadAccount(steve));
         a.poll();
 
-        assertTrue(b.service.addBalance(steve, 1_000.0).success());
-        assertTrue(b.service.setLevel(steve, 2).success());
+        assertTrue(b.run(b.service.addBalance(steve, 1_000.0)).success());
+        assertTrue(b.run(b.service.setLevel(steve, 2)).success());
 
         assertEquals(Set.of(steve.getUniqueId()), a.poll());
         BankAccount cached = a.service.getCachedAccount(steve.getUniqueId()).orElseThrow();
@@ -578,30 +561,30 @@ abstract class TwoServerScenarios {
     void thisServersOwnWritesAreNotReloaded() {
         Player steve = account("Steve", 100.0);
         wallets.set(steve.getUniqueId(), 500.0);
-        a.service.loadAccount(steve);
+        a.run(a.service.loadAccount(steve));
         a.poll();
 
-        assertTrue(a.service.deposit(steve, 200.0).success());
-        assertTrue(a.service.withdraw(steve, 50.0).success());
+        assertTrue(a.run(a.service.deposit(steve, 200.0)).success());
+        assertTrue(a.run(a.service.withdraw(steve, 50.0)).success());
 
         assertEquals(Set.of(), a.poll());
         assertEquals(250.0, a.cachedBalance(steve), 1e-9);
     }
 
     @Test
-    void aReloadThatLandsAfterANewerLocalWriteIsIgnored() {
+    void aReloadQueuedBeforeANewerLocalWriteDoesNotReplaceIt() {
         Player steve = account("Steve", 100.0);
         wallets.set(steve.getUniqueId(), 500.0);
-        a.service.loadAccount(steve);
+        a.run(a.service.loadAccount(steve));
         a.poll();
-        assertTrue(b.service.addBalance(steve, 1_000.0).success());
+        assertTrue(b.run(b.service.addBalance(steve, 1_000.0)).success());
 
         // the poll notices B's change and A's main thread asks for the row, which the database thread reads
         assertEquals(Set.of(steve.getUniqueId()), a.refresher.poll().join());
         a.main.drain();
         a.db.submit("wait for the reload read", () -> null).join();
-        // before the reloaded row reaches the main thread, a deposit on A writes a newer one
-        assertTrue(a.service.deposit(steve, 10.0).success());
+        // the reloaded row is waiting for the main thread when a deposit on A writes a newer one
+        assertTrue(a.run(a.service.deposit(steve, 10.0)).success());
         a.settle();
 
         assertEquals(1_110.0, a.cachedBalance(steve), 1e-9, "the older reloaded row did not replace the deposit");
@@ -611,9 +594,9 @@ abstract class TwoServerScenarios {
     @Test
     void aReloadForAPlayerWhoLeftDoesNotCacheThemAgain() {
         Player steve = account("Steve", 100.0);
-        a.service.loadAccount(steve);
+        a.run(a.service.loadAccount(steve));
         a.poll();
-        assertTrue(b.service.addBalance(steve, 1_000.0).success());
+        assertTrue(b.run(b.service.addBalance(steve, 1_000.0)).success());
 
         a.refresher.poll().join();
         a.service.unloadAccount(steve.getUniqueId());
@@ -626,8 +609,8 @@ abstract class TwoServerScenarios {
     void openingTheBankReadsTheRowBeforeShowingIt() {
         Player sender = account("Sender", 1_000.0);
         Player steve = account("Steve", 100.0);
-        a.service.loadAccount(steve);
-        assertTrue(b.service.transfer(sender, steve, 300.0).success());
+        a.run(a.service.loadAccount(steve));
+        assertTrue(b.run(b.service.transfer(sender, steve, 300.0)).success());
         List<Double> shown = new ArrayList<>();
 
         a.refresher.refresh(steve, () -> shown.add(a.service.getAccount(steve).balance()));
@@ -641,7 +624,7 @@ abstract class TwoServerScenarios {
     @Test
     void openingTheBankForAPlayerWhoLeftShowsNothing() {
         Player steve = account("Steve", 100.0);
-        a.service.loadAccount(steve);
+        a.run(a.service.loadAccount(steve));
         List<String> shown = new ArrayList<>();
         when(steve.isOnline()).thenReturn(false);
 

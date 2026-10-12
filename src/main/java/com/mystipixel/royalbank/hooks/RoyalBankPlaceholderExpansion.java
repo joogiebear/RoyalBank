@@ -4,7 +4,6 @@ import com.mystipixel.royalbank.service.BankService;
 import com.mystipixel.royalbank.config.BankLevel;
 import com.mystipixel.royalbank.data.BankAccount;
 import me.clip.placeholderapi.expansion.PlaceholderExpansion;
-import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -48,15 +47,11 @@ public final class RoyalBankPlaceholderExpansion extends PlaceholderExpansion {
             return "";
         }
 
-        // PlaceholderAPI may call this async: serve from the cache, and only fall back to the DB on the
-        // main thread
+        // PlaceholderAPI may call this async, so only the cache is read; it is filled at login
         try {
             Optional<BankAccount> cached = bankService.getCachedAccount(player.getUniqueId());
             if (cached.isEmpty()) {
-                if (!Bukkit.isPrimaryThread()) {
-                    return "";
-                }
-                cached = Optional.of(bankService.getAccount(player));
+                return "";
             }
             BankAccount account = cached.get();
             BankLevel level = bankService.getEffectiveLevel(account.level());

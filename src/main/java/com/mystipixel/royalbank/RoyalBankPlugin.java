@@ -3,6 +3,7 @@ package com.mystipixel.royalbank;
 import com.mystipixel.royalbank.command.BankCommand;
 import com.mystipixel.royalbank.service.BalanceRefresher;
 import com.mystipixel.royalbank.service.BankService;
+import com.mystipixel.royalbank.service.MainQueue;
 import com.mystipixel.royalbank.config.ConfigValidator;
 import com.mystipixel.royalbank.config.LevelManager;
 import com.mystipixel.royalbank.data.BankDatabase;
@@ -12,7 +13,6 @@ import com.mystipixel.royalbank.hooks.RoyalBankPlaceholderExpansion;
 import com.mystipixel.royalbank.hooks.VaultHook;
 import com.mystipixel.royalbank.message.MessageManager;
 import com.mystipixel.royalcommon.storage.DbExecutor;
-import com.mystipixel.royalcommon.storage.MainThread;
 import net.milkbowl.vault.economy.Economy;
 import org.bstats.bukkit.Metrics;
 import org.bstats.charts.SimplePie;
@@ -29,10 +29,12 @@ public final class RoyalBankPlugin extends JavaPlugin {
 
     // identifies the plugin, not the server, so it is fixed rather than configurable
     private static final int BSTATS_PLUGIN_ID = 31375;
+    private static final Duration SHUTDOWN_TIMEOUT = Duration.ofSeconds(10);
     private VaultHook vaultHook;
     private BankDatabase database;
     private LevelManager levelManager;
     private BankService bankService;
+    private MainQueue mainQueue;
     private DbExecutor dbExecutor;
     private BalanceRefresher balanceRefresher;
     private BankGui bankGui;
@@ -83,8 +85,12 @@ public final class RoyalBankPlugin extends JavaPlugin {
         }
         fullyEnabled = true;
 
-        this.bankService = new BankService(this, database, levelManager, vaultHook, messageManager);
-        database.migrateSharedAccountsToPlayerBanks(levelManager.getStartingLevel());
+        // every database call after connect() goes through this one ordered thread
+        this.mainQueue = MainQueue.bukkit(this);
+        this.dbExecutor = new DbExecutor(getName(), mainQueue, getLogger());
+        this.bankService = new BankService(this, database, levelManager, vaultHook, messageManager, dbExecutor);
+        int startingLevel = levelManager.getStartingLevel();
+        dbExecutor.submit("migrate shared bank accounts", () -> database.migrateSharedAccountsToPlayerBanks(startingLevel));
         getServer().getServicesManager().register(
                 com.mystipixel.royalbank.api.RoyalBankAPI.class, bankService, this,
                 org.bukkit.plugin.ServicePriority.Normal);
@@ -143,7 +149,6 @@ public final class RoyalBankPlugin extends JavaPlugin {
         if (database.type() != BankDatabase.Type.MYSQL) {
             return;
         }
-        dbExecutor = new DbExecutor(getName(), MainThread.bukkit(this), getLogger());
         balanceRefresher = new BalanceRefresher(bankService.accountCache(), database, dbExecutor);
         startBalanceRefresher();
     }
@@ -169,8 +174,12 @@ public final class RoyalBankPlugin extends JavaPlugin {
         if (balanceRefresher != null) {
             balanceRefresher.stop();
         }
+        if (bankService != null) {
+            bankService.close();
+        }
         if (dbExecutor != null) {
-            dbExecutor.shutdown(Duration.ofSeconds(5));
+            // actions in flight still finish, including a payout or a put-back that follows their transaction
+            mainQueue.finish(dbExecutor, SHUTDOWN_TIMEOUT);
         }
         if (textInput != null) {
             textInput.shutdown();
@@ -255,13 +264,11 @@ public final class RoyalBankPlugin extends JavaPlugin {
     }
 
     private void pruneTransactionsIfEnabled() {
-        if (database == null || !getConfig().getBoolean("transactions.prune-on-startup", true)) {
+        if (bankService == null || !getConfig().getBoolean("transactions.prune-on-startup", true)) {
             return;
         }
         int maxPerPlayer = getConfig().getInt("transactions.max-per-player", 100);
-        // async: the full-table scan would stall the server
-        getServer().getScheduler().runTaskAsynchronously(this, () -> {
-            int removed = database.pruneTransactions(maxPerPlayer);
+        bankService.pruneTransactions(maxPerPlayer).thenAccept(removed -> {
             if (removed > 0) {
                 getLogger().info("Pruned " + removed + " old bank transactions. Keeping newest " + maxPerPlayer + " per player.");
             }

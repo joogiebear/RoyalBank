@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.UnaryOperator;
 import java.util.logging.Level;
 import javax.sql.DataSource;
 
@@ -107,14 +108,23 @@ public final class BankDatabase {
     }
 
     private final JavaPlugin plugin;
+    private final UnaryOperator<DataSource> wrap;
 
     private Type type;
-    private HikariDataSource dataSource;
+    private HikariDataSource pool;
+    // the pool, or what wrap made of it; every query goes through this
+    private DataSource dataSource;
     private TxRunner db;
     private File databaseFile; // null when MYSQL
 
     public BankDatabase(JavaPlugin plugin) {
+        this(plugin, UnaryOperator.identity());
+    }
+
+    /** wrap sees the pool before anything uses it; tests use it to watch which thread opens connections. */
+    public BankDatabase(JavaPlugin plugin, UnaryOperator<DataSource> wrap) {
         this.plugin = plugin;
+        this.wrap = wrap;
     }
 
     public boolean connect() {
@@ -161,15 +171,17 @@ public final class BankDatabase {
                 hikari.setDataSourceProperties(SqliteSettings.properties());
             }
 
-            this.dataSource = new HikariDataSource(hikari);
+            this.pool = new HikariDataSource(hikari);
+            this.dataSource = wrap.apply(pool);
             this.db = new TxRunner(dataSource, TRANSACTION_ATTEMPTS);
             migrate();
             plugin.getLogger().info("RoyalBank connected to " + type + " storage.");
             return true;
         } catch (Exception exception) {
             plugin.getLogger().severe("RoyalBank storage init failed: " + exception.getMessage());
-            if (dataSource != null) {
-                dataSource.close();
+            if (pool != null) {
+                pool.close();
+                pool = null;
                 dataSource = null;
             }
             return false;
@@ -339,12 +351,15 @@ public final class BankDatabase {
      */
     public BankAccount getOrCreateAccount(OfflinePlayer player, int startingLevel) {
         String name = player.getName();
-        NewAccount key = new NewAccount(player.getUniqueId(), name == null ? "Unknown" : name, startingLevel, name != null);
+        return getOrCreateAccount(new NewAccount(player.getUniqueId(), name == null ? "Unknown" : name, startingLevel, name != null));
+    }
+
+    public BankAccount getOrCreateAccount(NewAccount key) {
         try {
             return db.inTransaction(tx -> lockOrCreate(tx, key));
         } catch (SQLException exception) {
             plugin.getLogger().severe("Could not load bank account " + key.uuid() + ": " + exception.getMessage());
-            return new BankAccount(key.uuid(), key.username(), 0.0, startingLevel, 0L, false);
+            return new BankAccount(key.uuid(), key.username(), 0.0, key.level(), 0L, false);
         }
     }
 
@@ -724,7 +739,7 @@ public final class BankDatabase {
     }
 
     public void close() {
-        if (dataSource == null) {
+        if (pool == null) {
             return;
         }
         if (!mysql()) {
@@ -735,7 +750,8 @@ public final class BankDatabase {
                 // best effort: keep the -wal file from growing
             }
         }
-        dataSource.close();
+        pool.close();
+        pool = null;
         dataSource = null;
     }
 }

@@ -3,6 +3,9 @@ no-permission: "&cYou do not have permission to do that."
 player-only: "Only players can use player bank commands. Use /bank admin for staff tools."
 reload-success: "&aRoyalBank reloaded. Loaded levels: {levels}"
 unknown-command: "&cUnknown subcommand. Use /bank, /bank deposit, /bank withdraw, /bank upgrade, /bank interest, /bank info, or /bank admin."
+# Shown when a player starts a bank action while their last one is still being saved.
+general:
+  busy: "&cYour last bank action is still being processed. Please wait a moment."
 custom-cancelled: "&eCustom bank action cancelled."
 custom-invalid-amount: "&cThat was not a safe valid amount. Use a number or shorthand (5k, 5m, 5b) without commas, or type cancel next time."
 # The custom amount dialog. In each prompt the first line is the dialog title and any further lines
@@ -206,14 +209,21 @@ alerts:
 notes:
   deposit: "Purse to bank"
   withdraw: "Bank to purse"
+  # The purse payment of a withdrawal failed, so the money went back into the bank.
+  withdraw-reverted: "Withdrawal returned to bank"
   bonus: "First deposit bonus"
   transfer-out: "Transfer to {player}"
   transfer-in: "Transfer from {player}"
   account-deposit: "{player} deposited"
   account-withdraw: "{player} withdrew"
+  account-withdraw-reverted: "{player}'s withdrawal returned to bank"
   upgrade: "Upgraded to {level_name}"
+  # The upgrade items were gone by the time they were to be taken, so the upgrade was undone and refunded.
+  upgrade-reverted: "Upgrade to {level_name} undone, items missing"
   interest: "Daily interest"
   interest-to-purse: "Daily interest to purse"
+  # The interest could not be paid to the purse, so the claim was undone.
+  interest-reverted: "Daily interest to purse not paid"
   admin-set-balance: "Admin set balance"
   admin-set-balance-capped: "Admin set balance (capped at level max, discarded {discarded})"
   admin-add-balance: "Admin added balance"

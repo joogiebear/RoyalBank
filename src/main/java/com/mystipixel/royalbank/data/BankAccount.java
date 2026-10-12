@@ -39,6 +39,15 @@ public record BankAccount(
         return new BankAccount(uuid, username, balance, level, timestamp, bonusClaimed, balance, version);
     }
 
+    // both capped at the balance, like every minimum
+    public BankAccount withClaimRestored(long timestamp, double minimum) {
+        return new BankAccount(uuid, username, balance, level, timestamp, bonusClaimed, Math.min(minimum, balance), version);
+    }
+
+    public BankAccount withMinBalanceSinceClaim(double minimum) {
+        return new BankAccount(uuid, username, balance, level, lastInterestClaim, bonusClaimed, Math.min(minimum, balance), version);
+    }
+
     public BankAccount withBonusClaimed(boolean claimed) {
         return new BankAccount(uuid, username, balance, level, lastInterestClaim, claimed, minBalanceSinceClaim, version);
     }
