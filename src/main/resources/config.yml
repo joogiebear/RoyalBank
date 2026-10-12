@@ -41,7 +41,8 @@ transactions:
   max-per-player: 100
   prune-on-startup: true
 
-# Storage backend. SQLITE (default, single server) or MYSQL (a shared bank DB across servers).
+# Storage backend. SQLITE (default) or MYSQL. Each server needs its own database for now: sharing one
+# between servers is planned but not safe yet, because servers can overwrite each other's data.
 storage:
   type: SQLITE
   sqlite-file: "bank.db"
