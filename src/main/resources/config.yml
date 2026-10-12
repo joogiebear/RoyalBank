@@ -46,6 +46,8 @@ transactions:
 storage:
   type: SQLITE
   sqlite-file: "bank.db"
+  # Seconds a bank action waits for a free database connection before it gives up.
+  connection-timeout-seconds: 10
   mysql:
     host: localhost
     port: 3306

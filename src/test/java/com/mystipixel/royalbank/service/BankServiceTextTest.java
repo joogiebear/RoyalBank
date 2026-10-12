@@ -6,6 +6,7 @@ import com.mystipixel.royalbank.config.LevelManager;
 import com.mystipixel.royalbank.config.RequirementType;
 import com.mystipixel.royalbank.data.BankAccount;
 import com.mystipixel.royalbank.data.BankDatabase;
+import com.mystipixel.royalbank.data.BankTransaction;
 import com.mystipixel.royalbank.hooks.VaultHook;
 import com.mystipixel.royalbank.message.MessageManager;
 import com.mystipixel.royalbank.message.TestMessages;
@@ -31,12 +32,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyDouble;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 // BankService returns keys; rendered through the bundled messages.yml they must read as before.
@@ -63,7 +60,10 @@ class BankServiceTextTest {
         messages = TestMessages.bundled(dataFolder);
         JavaPlugin plugin = mock(JavaPlugin.class);
         when(plugin.getConfig()).thenReturn(TestMessages.bundledConfig());
-        database = mock(BankDatabase.class);
+        when(plugin.getDataFolder()).thenReturn(dataFolder.toFile());
+        when(plugin.getLogger()).thenReturn(java.util.logging.Logger.getLogger("BankServiceTextTest"));
+        database = new BankDatabase(plugin);
+        assertTrue(database.connect());
         LevelManager levels = mock(LevelManager.class);
         when(levels.getLevels()).thenReturn(Map.of(1, STARTER, 2, GOLD));
         when(levels.getLevel(1)).thenReturn(Optional.of(STARTER));
@@ -82,12 +82,12 @@ class BankServiceTextTest {
 
     @AfterEach
     void tearDown() {
+        database.close();
         bukkit.close();
     }
 
     private void account(double balance, int level) {
-        BankAccount account = new BankAccount(player.getUniqueId(), "Steve", balance, level, 0L, false);
-        when(database.getOrCreateAccount(player, 1)).thenReturn(account);
+        assertTrue(database.saveAccount(new BankAccount(player.getUniqueId(), "Steve", balance, level, 0L, false)));
     }
 
     @Test
@@ -96,14 +96,14 @@ class BankServiceTextTest {
         when(economy.has(player, 100.0)).thenReturn(true);
         when(economy.withdrawPlayer(player, 100.0))
                 .thenReturn(new EconomyResponse(100.0, 0.0, EconomyResponse.ResponseType.SUCCESS, null));
-        when(database.saveAccountWithTransaction(any(), eq("DEPOSIT"), anyDouble(), anyDouble(), eq("Purse to bank")))
-                .thenReturn(true);
 
         OperationResult result = service.deposit(player, 100.0);
 
         assertTrue(result.success());
         assertEquals("&aDeposited $100.00 &aand received a first deposit bonus of &e$10.00&a!", messages.render(result));
-        verify(database).addTransaction(player.getUniqueId(), "BONUS", 10.0, 110.0, "First deposit bonus");
+        List<BankTransaction> ledger = database.getRecentTransactions(player.getUniqueId(), 10);
+        assertEquals(List.of("BONUS 10.0 110.0 First deposit bonus", "DEPOSIT 100.0 100.0 Purse to bank"),
+                ledger.stream().map(t -> t.type() + " " + t.amount() + " " + t.balanceAfter() + " " + t.note()).toList());
     }
 
     @Test
@@ -137,16 +137,13 @@ class BankServiceTextTest {
     @Test
     void sharedAccountApiStillReturnsColouredErrorsOrNull() {
         UUID coop = UUID.randomUUID();
-        when(database.getAccount(coop)).thenReturn(Optional.of(
-                new BankAccount(coop, "Coop", GOLD.maxBalance(), 2, 0L, false)));
+        assertTrue(database.saveAccount(new BankAccount(coop, "Coop", GOLD.maxBalance(), 2, 0L, false)));
         assertEquals("&cThe bank is full. Upgrade it to store more.", service.accountDeposit(player, coop, "Coop", 10.0));
         assertEquals("&eThe bank is already at the maximum level.", service.accountUpgrade(player, coop, "Coop"));
 
-        when(database.getAccount(coop)).thenReturn(Optional.of(new BankAccount(coop, "Coop", 500.0, 1, 0L, false)));
+        assertTrue(database.saveAccount(new BankAccount(coop, "Coop", 500.0, 1, 0L, false)));
         when(economy.depositPlayer(player, 100.0))
                 .thenReturn(new EconomyResponse(100.0, 0.0, EconomyResponse.ResponseType.SUCCESS, null));
-        when(database.saveCoopMovement(any(), eq("COOP_WITHDRAW"), anyDouble(), anyDouble(), eq("Steve withdrew"), any()))
-                .thenReturn(true);
         assertNull(service.accountWithdraw(player, coop, "Coop", 100.0));
         assertEquals("64x Gold Block", service.getUpgradeView(coop, "Coop").itemsText());
     }

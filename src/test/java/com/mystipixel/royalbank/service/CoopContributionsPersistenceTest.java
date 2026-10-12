@@ -24,6 +24,7 @@ import org.mockito.MockedStatic;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
@@ -101,7 +102,6 @@ class CoopContributionsPersistenceTest {
         database = new BankDatabase(plugin);
         assertTrue(database.connect());
         service = new BankService(plugin, database, levels, vault, messages);
-        service.loadCoopContributions();
         service.setAuditSink((uuid, username, action, amount, oldBalance, newBalance, incoming, counterparty, counterpartyName) -> {
             if (action.startsWith("coop-withdrew") || action.equals("coop-received")) {
                 events.add(new Event(uuid, action, amount, incoming, counterparty));
@@ -114,6 +114,19 @@ class CoopContributionsPersistenceTest {
         start();
     }
 
+    private List<CoopContribution> contributions() throws Exception {
+        List<CoopContribution> rows = new ArrayList<>();
+        try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + dataFolder.resolve("bank.db"));
+             Statement st = c.createStatement();
+             ResultSet rs = st.executeQuery("SELECT account_id, member_uuid, member_name, amount, seq FROM coop_contributions ORDER BY account_id, seq")) {
+            while (rs.next()) {
+                rows.add(new CoopContribution(UUID.fromString(rs.getString(1)), UUID.fromString(rs.getString(2)),
+                        rs.getString(3), rs.getDouble(4), rs.getLong(5)));
+            }
+        }
+        return rows;
+    }
+
     private Player player(String name) {
         Player player = mock(Player.class);
         when(player.getUniqueId()).thenReturn(UUID.randomUUID());
@@ -122,7 +135,7 @@ class CoopContributionsPersistenceTest {
     }
 
     @Test
-    void depositorsSurviveARestart() {
+    void depositorsSurviveARestart() throws Exception {
         Player alt = player("Alt");
         Player main = player("Main");
         assertNull(service.accountDeposit(alt, coop, "Coop", 300.0));
@@ -137,7 +150,7 @@ class CoopContributionsPersistenceTest {
                 new Event(main.getUniqueId(), "coop-withdrew", 100.0, false, null),
                 new Event(main.getUniqueId(), "coop-received", 150.0, true, alt.getUniqueId()),
                 new Event(alt.getUniqueId(), "coop-withdrew", 150.0, false, null)), events);
-        assertEquals(List.of(), database.loadCoopContributions(), "fully withdrawn depositors leave no rows");
+        assertEquals(List.of(), contributions(), "fully withdrawn depositors leave no rows");
     }
 
     @Test
@@ -185,6 +198,6 @@ class CoopContributionsPersistenceTest {
 
         assertEquals(300.0, service.getAccountBalance(coop), "the balance write rolled back with it");
         assertEquals(1, database.getRecentTransactions(coop, 10).size(), "no ledger row for the failed deposit");
-        assertEquals(List.of(new CoopContribution(coop, alt.getUniqueId(), "Alt", 300.0, 1L)), database.loadCoopContributions());
+        assertEquals(List.of(new CoopContribution(coop, alt.getUniqueId(), "Alt", 300.0, 1L)), contributions());
     }
 }

@@ -22,6 +22,9 @@ import org.junit.jupiter.api.io.TempDir;
 import org.mockito.MockedStatic;
 
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -34,13 +37,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
-// What each bank action reports to the audit sink (EconGuard when installed).
+// What each bank action reports to the audit sink (EconGuard when installed), against a real SQLite database.
 class BankServiceAuditTest {
 
     private static final BankLevel LEVEL = new BankLevel(1, "Starter Account", 50_000_000.0, 2.0, 250_000.0,
@@ -67,8 +68,10 @@ class BankServiceAuditTest {
         config.set("settings.first-deposit-bonus.enabled", false);
         JavaPlugin plugin = mock(JavaPlugin.class);
         when(plugin.getConfig()).thenReturn(config);
+        when(plugin.getDataFolder()).thenReturn(dataFolder.toFile());
         when(plugin.getLogger()).thenReturn(Logger.getLogger("BankServiceAuditTest"));
-        database = mock(BankDatabase.class);
+        database = new BankDatabase(plugin);
+        assertTrue(database.connect());
         LevelManager levels = mock(LevelManager.class);
         when(levels.getLevels()).thenReturn(Map.of(1, LEVEL));
         when(levels.getLevel(1)).thenReturn(Optional.of(LEVEL));
@@ -79,9 +82,6 @@ class BankServiceAuditTest {
                 .thenAnswer(i -> new EconomyResponse(i.getArgument(1), 0.0, EconomyResponse.ResponseType.SUCCESS, null));
         when(economy.depositPlayer(any(OfflinePlayer.class), anyDouble()))
                 .thenAnswer(i -> new EconomyResponse(i.getArgument(1), 0.0, EconomyResponse.ResponseType.SUCCESS, null));
-        when(database.saveAccountWithTransaction(any(), anyString(), anyDouble(), anyDouble(), any())).thenReturn(true);
-        when(database.saveCoopMovement(any(), anyString(), anyDouble(), anyDouble(), any(), any())).thenReturn(true);
-        when(database.saveTransfer(any(), any(), anyDouble(), anyString(), any(), anyString(), any())).thenReturn(true);
         VaultHook vault = mock(VaultHook.class);
         when(vault.getEconomy()).thenReturn(economy);
         service = new BankService(plugin, database, levels, vault, messages);
@@ -91,6 +91,7 @@ class BankServiceAuditTest {
 
     @AfterEach
     void tearDown() {
+        database.close();
         bukkit.close();
     }
 
@@ -99,12 +100,19 @@ class BankServiceAuditTest {
         UUID uuid = UUID.randomUUID();
         when(player.getUniqueId()).thenReturn(uuid);
         when(player.getName()).thenReturn(name);
-        when(database.getOrCreateAccount(player, 1)).thenReturn(new BankAccount(uuid, name, bankBalance, 1, 0L, false));
+        assertTrue(database.saveAccount(new BankAccount(uuid, name, bankBalance, 1, 0L, false)));
         return player;
     }
 
     private void coopBalance(UUID coop, double balance) {
-        when(database.getAccount(coop)).thenReturn(Optional.of(new BankAccount(coop, "Coop", balance, 1, 0L, false)));
+        assertTrue(database.saveAccount(new BankAccount(coop, "Coop", balance, 1, 0L, false)));
+    }
+
+    private void sql(String statement) throws Exception {
+        try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + dataFolder.resolve("bank.db"));
+             Statement st = c.createStatement()) {
+            st.executeUpdate(statement);
+        }
     }
 
     @Test
@@ -153,12 +161,9 @@ class BankServiceAuditTest {
 
         coopBalance(coop, 0.0);
         assertNull(service.accountDeposit(alt, coop, "Coop", 300.0));
-        coopBalance(coop, 300.0);
         assertNull(service.accountDeposit(main, coop, "Coop", 100.0));
-        coopBalance(coop, 400.0);
         // main takes back its own 100 first, then 150 of the alt's 300
         assertNull(service.accountWithdraw(main, coop, "Coop", 250.0));
-        coopBalance(coop, 150.0);
         // the alt's remaining 150 is its own money
         assertNull(service.accountWithdraw(alt, coop, "Coop", 150.0));
 
@@ -182,18 +187,18 @@ class BankServiceAuditTest {
     }
 
     @Test
-    void aCoopWithdrawalThatIsNotSavedKeepsItsDepositors() {
+    void aCoopWithdrawalThatIsNotSavedKeepsItsDepositors() throws Exception {
         UUID coop = UUID.randomUUID();
         Player alt = player("Alt", 0.0);
         Player main = player("Main", 0.0);
         coopBalance(coop, 0.0);
         assertNull(service.accountDeposit(alt, coop, "Coop", 300.0));
-        coopBalance(coop, 300.0);
 
-        when(database.saveCoopMovement(any(), eq("COOP_WITHDRAW"), anyDouble(), anyDouble(), any(), any())).thenReturn(false);
+        sql("CREATE TRIGGER no_coop_withdraw BEFORE INSERT ON bank_transactions WHEN NEW.type = 'COOP_WITHDRAW'"
+                + " BEGIN SELECT RAISE(ABORT, 'blocked'); END");
         assertEquals("&cWithdrawal could not be saved and was reverted; please try again.",
                 service.accountWithdraw(main, coop, "Coop", 300.0));
-        when(database.saveCoopMovement(any(), eq("COOP_WITHDRAW"), anyDouble(), anyDouble(), any(), any())).thenReturn(true);
+        sql("DROP TRIGGER no_coop_withdraw");
         assertNull(service.accountWithdraw(main, coop, "Coop", 300.0));
 
         assertEquals(List.of(

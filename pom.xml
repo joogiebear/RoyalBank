@@ -22,6 +22,10 @@
             <url>https://repo.papermc.io/repository/maven-public/</url>
         </repository>
         <repository>
+            <id>royal-common</id>
+            <url>https://raw.githubusercontent.com/joogiebear/royal-common/maven</url>
+        </repository>
+        <repository>
             <id>jitpack.io</id>
             <url>https://jitpack.io</url>
         </repository>
@@ -67,6 +71,12 @@
             <artifactId>mysql-connector-j</artifactId>
             <version>26.7.0</version>
             <scope>provided</scope>
+        </dependency>
+        <!-- shared storage code, shaded and relocated below -->
+        <dependency>
+            <groupId>com.github.joogiebear</groupId>
+            <artifactId>royal-common</artifactId>
+            <version>2026.41.1</version>
         </dependency>
         <!-- bStats is still shaded (relocated) into the jar; it is not a library-loader artifact. -->
         <dependency>
@@ -153,6 +163,10 @@
                                 <relocation>
                                     <pattern>org.bstats</pattern>
                                     <shadedPattern>com.mystipixel.royalbank.libs.bstats</shadedPattern>
+                                </relocation>
+                                <relocation>
+                                    <pattern>com.mystipixel.royalcommon</pattern>
+                                    <shadedPattern>com.mystipixel.royalbank.libs.royalcommon</shadedPattern>
                                 </relocation>
                             </relocations>
                         </configuration>
