@@ -1,3 +1,11 @@
+## 2026.41.4 - 2026-10-11
+
+### Fixes
+- make every bank change one locked transaction (`9ba8375`)
+
+### Documentation
+- say each server needs its own database for now (`af0e633`)
+
 ## 2026.41.3 - 2026-10-11
 
 ### Fixes
