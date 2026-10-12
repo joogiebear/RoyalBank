@@ -1,5 +1,9 @@
 package com.mystipixel.royalbank.data;
 
+import com.mystipixel.royalcommon.storage.Dialect;
+import com.mystipixel.royalcommon.storage.SchemaVersion;
+import com.mystipixel.royalcommon.storage.Tx;
+import com.mystipixel.royalcommon.storage.TxRunner;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.bukkit.OfflinePlayer;
@@ -14,31 +18,96 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 import java.util.logging.Level;
 
 /**
  * SQLite or MySQL behind one HikariCP pool. Driver and pool come from Paper's library loader
  * (plugin.yml {@code libraries}), nothing is shaded.
+ *
+ * <p>Every money change is one transaction that locks the account row, re-reads it and lets a rule decide
+ * on that fresh row, so a change made by another server on the same database is never overwritten.
  */
 public final class BankDatabase {
 
     public enum Type { SQLITE, MYSQL }
 
+    static final int SCHEMA_VERSION = 1;
+    // a deadlock, lock wait timeout or busy database is retried this often before the action fails
+    static final int TRANSACTION_ATTEMPTS = 3;
+    static final int DEFAULT_CONNECTION_TIMEOUT_SECONDS = 10;
+
     private static final double CONTRIBUTION_EPSILON = 1e-6;
 
     private static final String INSERT_TRANSACTION_SQL =
             "INSERT INTO bank_transactions (uuid, type, amount, balance_after, created_at, note) VALUES (?, ?, ?, ?, ?, ?)";
+    private static final String SELECT_ACCOUNT_SQL =
+            "SELECT uuid, username, balance, level, last_interest_claim, bonus_claimed,"
+                    + " COALESCE(min_balance_since_claim, balance) AS min_balance FROM player_banks WHERE uuid = ?";
+    private static final String UPDATE_ACCOUNT_SQL =
+            "UPDATE player_banks SET username = ?, balance = ?, level = ?, last_interest_claim = ?, bonus_claimed = ?,"
+                    + " min_balance_since_claim = ?, version = version + 1 WHERE uuid = ?";
+
+    /** The row to create when an account does not exist yet; rename also updates the stored name. */
+    public record NewAccount(UUID uuid, String username, int level, boolean rename) {
+    }
+
+    /** A {@code bank_transactions} row. */
+    public record Ledger(UUID account, String type, double amount, double balanceAfter, String note) {
+    }
+
+    /**
+     * What a rule decided after reading the locked rows: the rows to write (none when it turned the action
+     * down) and a result for the caller.
+     */
+    public record Change<R>(List<BankAccount> accounts, List<Ledger> ledger, List<CoopContribution> contributions, R result) {
+
+        public static <R> Change<R> none(R result) {
+            return new Change<>(List.of(), List.of(), List.of(), result);
+        }
+
+        public static <R> Change<R> write(BankAccount account, List<Ledger> ledger, R result) {
+            return new Change<>(List.of(account), ledger, List.of(), result);
+        }
+
+        public boolean written() {
+            return !accounts.isEmpty();
+        }
+
+        public BankAccount account() {
+            return accounts.getFirst();
+        }
+    }
+
+    /** Decides a change from the locked, current row. May run more than once, so it must not touch anything else. */
+    @FunctionalInterface
+    public interface Rule<R> {
+        Change<R> decide(BankAccount current);
+    }
+
+    @FunctionalInterface
+    public interface PairRule<R> {
+        Change<R> decide(BankAccount first, BankAccount second);
+    }
+
+    /**
+     * depositors: the account's coop_contributions rows in the order they first paid in; nextSeq orders a new
+     * depositor after them.
+     */
+    @FunctionalInterface
+    public interface CoopRule<R> {
+        Change<R> decide(BankAccount current, List<CoopContribution> depositors, long nextSeq);
+    }
 
     private final JavaPlugin plugin;
 
     private Type type;
     private HikariDataSource dataSource;
+    private TxRunner db;
     private File databaseFile; // null when MYSQL
 
     public BankDatabase(JavaPlugin plugin) {
@@ -56,6 +125,8 @@ public final class BankDatabase {
 
             HikariConfig hikari = new HikariConfig();
             hikari.setPoolName("RoyalBank");
+            int timeoutSeconds = Math.max(1, storage.getInt("connection-timeout-seconds", DEFAULT_CONNECTION_TIMEOUT_SECONDS));
+            hikari.setConnectionTimeout(timeoutSeconds * 1000L);
 
             if (type == Type.MYSQL) {
                 ConfigurationSection my = storage.getConfigurationSection("mysql");
@@ -88,11 +159,16 @@ public final class BankDatabase {
             }
 
             this.dataSource = new HikariDataSource(hikari);
-            createTables();
+            this.db = new TxRunner(dataSource, TRANSACTION_ATTEMPTS);
+            migrate();
             plugin.getLogger().info("RoyalBank connected to " + type + " storage.");
             return true;
         } catch (Exception exception) {
             plugin.getLogger().severe("RoyalBank storage init failed: " + exception.getMessage());
+            if (dataSource != null) {
+                dataSource.close();
+                dataSource = null;
+            }
             return false;
         }
     }
@@ -109,7 +185,25 @@ public final class BankDatabase {
         return type == Type.MYSQL;
     }
 
-    private void createTables() throws SQLException {
+    // each step checks before it changes anything: on MySQL a server that dies half way runs it again
+    private void migrate() throws SQLException {
+        int before = new SchemaVersion(db, "royalbank").ensure(SCHEMA_VERSION, (connection, dialect, from, to) -> {
+            if (from < 1) {
+                createTables(connection);
+                addMissingColumns(connection);
+            }
+        });
+        if (before < SCHEMA_VERSION) {
+            plugin.getLogger().info("Database schema migrated from version " + before + " to " + SCHEMA_VERSION + ".");
+        }
+        // NULL means "not known yet" (a row written without the column) and starts at the current balance
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement()) {
+            statement.executeUpdate("UPDATE player_banks SET min_balance_since_claim = balance WHERE min_balance_since_claim IS NULL");
+        }
+    }
+
+    private void createTables(Connection connection) throws SQLException {
         String banksDdl = mysql() ? """
                 CREATE TABLE IF NOT EXISTS player_banks (
                     uuid VARCHAR(36) PRIMARY KEY,
@@ -118,7 +212,8 @@ public final class BankDatabase {
                     level INT NOT NULL DEFAULT 1,
                     last_interest_claim BIGINT NOT NULL DEFAULT 0,
                     bonus_claimed TINYINT NOT NULL DEFAULT 0,
-                    min_balance_since_claim DOUBLE NULL
+                    min_balance_since_claim DOUBLE NULL,
+                    version BIGINT NOT NULL DEFAULT 0
                 )
                 """ : """
                 CREATE TABLE IF NOT EXISTS player_banks (
@@ -128,7 +223,8 @@ public final class BankDatabase {
                     level INTEGER NOT NULL DEFAULT 1,
                     last_interest_claim INTEGER NOT NULL DEFAULT 0,
                     bonus_claimed INTEGER NOT NULL DEFAULT 0,
-                    min_balance_since_claim REAL
+                    min_balance_since_claim REAL,
+                    version INTEGER NOT NULL DEFAULT 0
                 )
                 """;
         String transactionsDdl = mysql() ? """
@@ -185,8 +281,7 @@ public final class BankDatabase {
                     PRIMARY KEY (account_id, member_uuid)
                 )
                 """;
-        try (Connection connection = dataSource.getConnection();
-             Statement statement = connection.createStatement()) {
+        try (Statement statement = connection.createStatement()) {
             statement.executeUpdate(banksDdl);
             statement.executeUpdate(transactionsDdl);
             statement.executeUpdate(sharedDdl);
@@ -196,31 +291,23 @@ public final class BankDatabase {
                         "CREATE INDEX IF NOT EXISTS idx_bank_transactions_uuid_created ON bank_transactions(uuid, created_at DESC)");
             }
         }
-        if (!mysql()) {
-            migrateSqlite();
-        }
-        addMinBalanceColumn();
     }
 
-    // NULL means "not known yet" and is filled with the current balance, so an interrupted
-    // migration is finished on the next start
-    private void addMinBalanceColumn() throws SQLException {
-        try (Connection connection = dataSource.getConnection();
-             Statement statement = connection.createStatement()) {
-            if (!hasColumn(connection, "player_banks", "min_balance_since_claim")) {
-                try {
-                    statement.executeUpdate("ALTER TABLE player_banks ADD COLUMN min_balance_since_claim "
-                            + (mysql() ? "DOUBLE NULL" : "REAL"));
-                    plugin.getLogger().info("Migrated player_banks: added min_balance_since_claim column.");
-                } catch (SQLException exception) {
-                    // another server on the same MySQL database may have added it first
-                    if (!hasColumn(connection, "player_banks", "min_balance_since_claim")) {
-                        throw exception;
-                    }
-                }
-            }
-            statement.executeUpdate("UPDATE player_banks SET min_balance_since_claim = balance WHERE min_balance_since_claim IS NULL");
+    // player_banks files from older builds; MySQL tables were always created with bonus_claimed
+    private void addMissingColumns(Connection connection) throws SQLException {
+        addColumn(connection, "bonus_claimed", mysql() ? "TINYINT NOT NULL DEFAULT 0" : "INTEGER NOT NULL DEFAULT 0");
+        addColumn(connection, "min_balance_since_claim", mysql() ? "DOUBLE NULL" : "REAL");
+        addColumn(connection, "version", mysql() ? "BIGINT NOT NULL DEFAULT 0" : "INTEGER NOT NULL DEFAULT 0");
+    }
+
+    private void addColumn(Connection connection, String column, String definition) throws SQLException {
+        if (hasColumn(connection, "player_banks", column)) {
+            return;
         }
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate("ALTER TABLE player_banks ADD COLUMN " + column + " " + definition);
+        }
+        plugin.getLogger().info("Migrated player_banks: added " + column + " column.");
     }
 
     private static boolean hasColumn(Connection connection, String table, String column) throws SQLException {
@@ -234,65 +321,27 @@ public final class BankDatabase {
         return false;
     }
 
-    // MySQL tables are always created current, only old SQLite files need this
-    private void migrateSqlite() throws SQLException {
-        Set<String> columns = new HashSet<>();
-        try (Connection connection = dataSource.getConnection();
-             Statement statement = connection.createStatement();
-             ResultSet resultSet = statement.executeQuery("PRAGMA table_info(player_banks)")) {
-            while (resultSet.next()) {
-                columns.add(resultSet.getString("name").toLowerCase(Locale.ROOT));
-            }
-        }
-        if (!columns.contains("bonus_claimed")) {
-            try (Connection connection = dataSource.getConnection();
-                 Statement statement = connection.createStatement()) {
-                statement.executeUpdate("ALTER TABLE player_banks ADD COLUMN bonus_claimed INTEGER NOT NULL DEFAULT 0");
-                plugin.getLogger().info("Migrated player_banks: added bonus_claimed column.");
-            }
-        }
-    }
-
+    /**
+     * Creates the account if it is missing and never overwrites one that exists; a changed name only updates
+     * the username. On a database failure it logs and returns an unsaved starting account.
+     */
     public BankAccount getOrCreateAccount(OfflinePlayer player, int startingLevel) {
-        Optional<BankAccount> existing = getAccount(player.getUniqueId());
-        if (existing.isPresent()) {
-            BankAccount account = existing.get();
-            String currentName = player.getName() == null ? account.username() : player.getName();
-            if (!account.username().equalsIgnoreCase(currentName)) {
-                BankAccount renamed = account.withUsername(currentName);
-                saveAccount(renamed);
-                return renamed;
-            }
-            return account;
+        String name = player.getName();
+        NewAccount key = new NewAccount(player.getUniqueId(), name == null ? "Unknown" : name, startingLevel, name != null);
+        try {
+            return db.inTransaction(tx -> lockOrCreate(tx, key));
+        } catch (SQLException exception) {
+            plugin.getLogger().severe("Could not load bank account " + key.uuid() + ": " + exception.getMessage());
+            return new BankAccount(key.uuid(), key.username(), 0.0, startingLevel, 0L, false);
         }
-
-        BankAccount created = new BankAccount(
-                player.getUniqueId(),
-                player.getName() == null ? "Unknown" : player.getName(),
-                0.0, startingLevel, 0L, false);
-        saveAccount(created);
-        return created;
     }
 
     public Optional<BankAccount> getAccount(UUID uuid) {
-        String sql = "SELECT uuid, username, balance, level, last_interest_claim, bonus_claimed,"
-                + " COALESCE(min_balance_since_claim, balance) AS min_balance FROM player_banks WHERE uuid = ?";
         try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
+             PreparedStatement statement = connection.prepareStatement(SELECT_ACCOUNT_SQL)) {
             statement.setString(1, uuid.toString());
             try (ResultSet resultSet = statement.executeQuery()) {
-                if (!resultSet.next()) {
-                    return Optional.empty();
-                }
-                return Optional.of(new BankAccount(
-                        UUID.fromString(resultSet.getString("uuid")),
-                        resultSet.getString("username"),
-                        resultSet.getDouble("balance"),
-                        resultSet.getInt("level"),
-                        resultSet.getLong("last_interest_claim"),
-                        resultSet.getInt("bonus_claimed") != 0,
-                        resultSet.getDouble("min_balance")
-                ));
+                return resultSet.next() ? Optional.of(readAccount(resultSet)) : Optional.empty();
             }
         } catch (SQLException exception) {
             plugin.getLogger().severe("Could not load bank account " + uuid + ": " + exception.getMessage());
@@ -300,97 +349,166 @@ public final class BankDatabase {
         }
     }
 
-    /** Returns false (and logs) on failure so the caller can roll back. */
+    /** Replaces every field of the account, as a profile swap does. Returns false (and logs) on failure. */
     public boolean saveAccount(BankAccount account) {
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement(saveAccountSql())) {
-            bindAccount(statement, account);
-            statement.executeUpdate();
-            return true;
-        } catch (SQLException exception) {
-            plugin.getLogger().severe("Could not save bank account " + account.uuid() + ": " + exception.getMessage());
-            return false;
-        }
+        NewAccount key = new NewAccount(account.uuid(), account.username(), account.level(), false);
+        return change(key, current -> Change.write(account, List.of(), Boolean.TRUE)).isPresent();
     }
 
-    /** Account row and its ledger row in one DB transaction: both land or neither does. */
-    public boolean saveAccountWithTransaction(BankAccount account, String type, double amount, double balanceAfter, String note) {
-        return saveCoopMovement(account, type, amount, balanceAfter, note, List.of());
+    /**
+     * Runs a rule against one locked account row (created first when missing) and writes what it decided,
+     * with its ledger rows, in the same transaction. Empty when the database failed; that is logged.
+     */
+    public <R> Optional<Change<R>> change(NewAccount key, Rule<R> rule) {
+        return run(key.uuid().toString(), tx -> {
+            Change<R> change = rule.decide(lockOrCreate(tx, key));
+            apply(tx, change);
+            return change;
+        });
     }
 
-    // a shared account movement: the account row, its ledger row and the depositor changes land together
-    public boolean saveCoopMovement(BankAccount account, String type, double amount, double balanceAfter, String note,
-                                    List<CoopContribution> contributionChanges) {
-        try (Connection connection = dataSource.getConnection()) {
-            boolean previousAutoCommit = connection.getAutoCommit();
-            connection.setAutoCommit(false);
-            try {
-                try (PreparedStatement accountStatement = connection.prepareStatement(saveAccountSql())) {
-                    bindAccount(accountStatement, account);
-                    accountStatement.executeUpdate();
+    /** Two accounts, locked in uuid order so two transfers in opposite directions cannot deadlock. */
+    public <R> Optional<Change<R>> transfer(NewAccount first, NewAccount second, PairRule<R> rule) {
+        return run(first.uuid() + " -> " + second.uuid(), tx -> {
+            List<NewAccount> lockOrder = new ArrayList<>(List.of(first, second));
+            lockOrder.sort(Comparator.comparing(key -> key.uuid().toString()));
+            BankAccount lockedFirst = null;
+            BankAccount lockedSecond = null;
+            for (NewAccount key : lockOrder) {
+                BankAccount locked = lockOrCreate(tx, key);
+                if (key == first) {
+                    lockedFirst = locked;
+                } else {
+                    lockedSecond = locked;
                 }
-                try (PreparedStatement transactionStatement = connection.prepareStatement(INSERT_TRANSACTION_SQL)) {
-                    bindTransaction(transactionStatement, account.uuid(), type, amount, balanceAfter, note);
-                    transactionStatement.executeUpdate();
-                }
-                applyContributionChanges(connection, contributionChanges);
-                connection.commit();
-                return true;
-            } catch (SQLException exception) {
-                rollbackQuietly(connection);
-                plugin.getLogger().severe("Could not save bank account+transaction for " + account.uuid() + ": " + exception.getMessage());
-                return false;
-            } finally {
-                restoreAutoCommit(connection, previousAutoCommit);
             }
+            Change<R> change = rule.decide(lockedFirst, lockedSecond);
+            apply(tx, change);
+            return change;
+        });
+    }
+
+    /** A shared account with its depositors, read inside the same locked transaction. */
+    public <R> Optional<Change<R>> changeCoop(NewAccount key, CoopRule<R> rule) {
+        return run(key.uuid().toString(), tx -> {
+            BankAccount current = lockOrCreate(tx, key);
+            List<CoopContribution> depositors = depositors(tx, key.uuid());
+            long nextSeq = depositors.stream().mapToLong(CoopContribution::seq).max().orElse(0L) + 1;
+            Change<R> change = rule.decide(current, depositors.stream().filter(d -> d.amount() > CONTRIBUTION_EPSILON).toList(), nextSeq);
+            apply(tx, change);
+            return change;
+        });
+    }
+
+    private <R> Optional<Change<R>> run(String what, TxRunner.Work<Change<R>> work) {
+        try {
+            return Optional.of(db.inTransaction(work));
         } catch (SQLException exception) {
-            plugin.getLogger().severe("Bank DB connection error (account+transaction): " + exception.getMessage());
-            return false;
+            plugin.getLogger().severe("Could not save bank change for " + what + ": " + exception.getMessage());
+            return Optional.empty();
         }
     }
 
-    /** Both balances and both ledger rows in one DB transaction. */
-    public boolean saveTransfer(BankAccount sender, BankAccount recipient, double amount,
-                                String senderType, String senderNote,
-                                String recipientType, String recipientNote) {
-        try (Connection connection = dataSource.getConnection()) {
-            boolean previousAutoCommit = connection.getAutoCommit();
-            connection.setAutoCommit(false);
-            try {
-                try (PreparedStatement accountStatement = connection.prepareStatement(saveAccountSql())) {
-                    bindAccount(accountStatement, sender);
-                    accountStatement.executeUpdate();
-                    bindAccount(accountStatement, recipient);
-                    accountStatement.executeUpdate();
-                }
-                try (PreparedStatement transactionStatement = connection.prepareStatement(INSERT_TRANSACTION_SQL)) {
-                    bindTransaction(transactionStatement, sender.uuid(), senderType, amount, sender.balance(), senderNote);
-                    transactionStatement.executeUpdate();
-                    bindTransaction(transactionStatement, recipient.uuid(), recipientType, amount, recipient.balance(), recipientNote);
-                    transactionStatement.executeUpdate();
-                }
-                connection.commit();
-                return true;
-            } catch (SQLException exception) {
-                rollbackQuietly(connection);
-                plugin.getLogger().severe("Could not save bank transfer " + sender.uuid() + " -> " + recipient.uuid()
-                        + ": " + exception.getMessage());
-                return false;
-            } finally {
-                restoreAutoCommit(connection, previousAutoCommit);
+    private BankAccount lockOrCreate(Tx tx, NewAccount key) throws SQLException {
+        Optional<BankAccount> row = selectForUpdate(tx, key.uuid());
+        if (row.isEmpty()) {
+            String insert = tx.dialect().insertIgnore() + " INTO player_banks (uuid, username, balance, level,"
+                    + " last_interest_claim, bonus_claimed, min_balance_since_claim, version) VALUES (?, ?, 0, ?, 0, 0, 0, 0)";
+            try (PreparedStatement statement = tx.connection().prepareStatement(insert)) {
+                statement.setString(1, key.uuid().toString());
+                statement.setString(2, key.username());
+                statement.setInt(3, key.level());
+                statement.executeUpdate();
             }
-        } catch (SQLException exception) {
-            plugin.getLogger().severe("Bank DB connection error (transfer): " + exception.getMessage());
-            return false;
+            row = selectForUpdate(tx, key.uuid());
+        }
+        BankAccount account = row.orElseThrow(() -> new SQLException("Bank account " + key.uuid() + " is missing after insert"));
+        if (key.rename() && !account.username().equalsIgnoreCase(key.username())) {
+            try (PreparedStatement statement = tx.connection().prepareStatement(
+                    "UPDATE player_banks SET username = ?, version = version + 1 WHERE uuid = ?")) {
+                statement.setString(1, key.username());
+                statement.setString(2, key.uuid().toString());
+                statement.executeUpdate();
+            }
+            account = account.withUsername(key.username());
+        }
+        return account;
+    }
+
+    private Optional<BankAccount> selectForUpdate(Tx tx, UUID uuid) throws SQLException {
+        try (PreparedStatement statement = tx.connection().prepareStatement(SELECT_ACCOUNT_SQL + tx.dialect().forUpdate())) {
+            statement.setString(1, uuid.toString());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? Optional.of(readAccount(resultSet)) : Optional.empty();
+            }
         }
     }
 
-    // relative updates, so a change made on another server sharing the MySQL database is not overwritten
-    private void applyContributionChanges(Connection connection, List<CoopContribution> changes) throws SQLException {
+    private static BankAccount readAccount(ResultSet resultSet) throws SQLException {
+        return new BankAccount(
+                UUID.fromString(resultSet.getString("uuid")),
+                resultSet.getString("username"),
+                resultSet.getDouble("balance"),
+                resultSet.getInt("level"),
+                resultSet.getLong("last_interest_claim"),
+                resultSet.getInt("bonus_claimed") != 0,
+                resultSet.getDouble("min_balance"));
+    }
+
+    // a locking read, so on MySQL it sees the last committed rows rather than the transaction's snapshot
+    private List<CoopContribution> depositors(Tx tx, UUID account) throws SQLException {
+        String sql = "SELECT account_id, member_uuid, member_name, amount, seq FROM coop_contributions"
+                + " WHERE account_id = ? ORDER BY seq" + tx.dialect().forUpdate();
+        List<CoopContribution> rows = new ArrayList<>();
+        try (PreparedStatement statement = tx.connection().prepareStatement(sql)) {
+            statement.setString(1, account.toString());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    rows.add(new CoopContribution(
+                            UUID.fromString(resultSet.getString("account_id")),
+                            UUID.fromString(resultSet.getString("member_uuid")),
+                            resultSet.getString("member_name"),
+                            resultSet.getDouble("amount"),
+                            resultSet.getLong("seq")));
+                }
+            }
+        }
+        return rows;
+    }
+
+    private void apply(Tx tx, Change<?> change) throws SQLException {
+        if (!change.written()) {
+            return;
+        }
+        Connection connection = tx.connection();
+        try (PreparedStatement statement = connection.prepareStatement(UPDATE_ACCOUNT_SQL)) {
+            for (BankAccount account : change.accounts()) {
+                statement.setString(1, account.username());
+                statement.setDouble(2, account.balance());
+                statement.setInt(3, account.level());
+                statement.setLong(4, account.lastInterestClaim());
+                statement.setInt(5, account.bonusClaimed() ? 1 : 0);
+                statement.setDouble(6, account.minBalanceSinceClaim());
+                statement.setString(7, account.uuid().toString());
+                if (statement.executeUpdate() != 1) {
+                    throw new SQLException("Bank account " + account.uuid() + " was not locked before writing");
+                }
+            }
+        }
+        try (PreparedStatement statement = connection.prepareStatement(INSERT_TRANSACTION_SQL)) {
+            for (Ledger row : change.ledger()) {
+                bindTransaction(statement, row.account(), row.type(), row.amount(), row.balanceAfter(), row.note());
+                statement.executeUpdate();
+            }
+        }
+        applyContributionChanges(connection, tx.dialect(), change.contributions());
+    }
+
+    private void applyContributionChanges(Connection connection, Dialect dialect, List<CoopContribution> changes) throws SQLException {
         if (changes.isEmpty()) {
             return;
         }
-        String add = mysql()
+        String add = dialect == Dialect.MYSQL
                 ? "INSERT INTO coop_contributions (account_id, member_uuid, member_name, amount, seq) VALUES (?, ?, ?, ?, ?) "
                 + "ON DUPLICATE KEY UPDATE amount = amount + VALUES(amount), member_name = VALUES(member_name)"
                 : "INSERT INTO coop_contributions (account_id, member_uuid, member_name, amount, seq) VALUES (?, ?, ?, ?, ?) "
@@ -423,29 +541,6 @@ public final class BankDatabase {
                 }
             }
         }
-    }
-
-    // ordered by account, then by when each member first paid in
-    public List<CoopContribution> loadCoopContributions() {
-        String sql = "SELECT account_id, member_uuid, member_name, amount, seq FROM coop_contributions ORDER BY account_id, seq";
-        List<CoopContribution> rows = new ArrayList<>();
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql);
-             ResultSet resultSet = statement.executeQuery()) {
-            while (resultSet.next()) {
-                rows.add(new CoopContribution(
-                        UUID.fromString(resultSet.getString("account_id")),
-                        UUID.fromString(resultSet.getString("member_uuid")),
-                        resultSet.getString("member_name"),
-                        resultSet.getDouble("amount"),
-                        resultSet.getLong("seq")));
-            }
-        } catch (SQLException exception) {
-            plugin.getLogger().severe("Could not load coop depositors; coop withdrawals will be reported as untracked: "
-                    + exception.getMessage());
-            return List.of();
-        }
-        return rows;
     }
 
     /** Copies legacy {@code shared_banks} rows into {@code player_banks}. Idempotent. */
@@ -488,79 +583,24 @@ public final class BankDatabase {
                 + "ON DUPLICATE KEY UPDATE label = VALUES(label), balance = VALUES(balance)"
                 : "INSERT INTO shared_banks (id, label, balance) VALUES (?, ?, ?) "
                 + "ON CONFLICT(id) DO UPDATE SET label = excluded.label, balance = excluded.balance";
-        try (Connection connection = dataSource.getConnection()) {
-            boolean previousAutoCommit = connection.getAutoCommit();
-            connection.setAutoCommit(false);
-            try {
-                try (PreparedStatement statement = connection.prepareStatement(upsert)) {
+        try {
+            return db.inTransaction(tx -> {
+                try (PreparedStatement statement = tx.connection().prepareStatement(upsert)) {
                     statement.setString(1, id.toString());
                     statement.setString(2, label == null ? "" : label);
                     statement.setDouble(3, newBalance);
                     statement.executeUpdate();
                 }
-                try (PreparedStatement transactionStatement = connection.prepareStatement(INSERT_TRANSACTION_SQL)) {
+                try (PreparedStatement transactionStatement = tx.connection().prepareStatement(INSERT_TRANSACTION_SQL)) {
                     bindTransaction(transactionStatement, id, type, amount, newBalance, note);
                     transactionStatement.executeUpdate();
                 }
-                connection.commit();
                 return true;
-            } catch (SQLException exception) {
-                rollbackQuietly(connection);
-                plugin.getLogger().severe("Could not save shared bank " + id + ": " + exception.getMessage());
-                return false;
-            } finally {
-                restoreAutoCommit(connection, previousAutoCommit);
-            }
+            });
         } catch (SQLException exception) {
-            plugin.getLogger().severe("Bank DB connection error (shared account): " + exception.getMessage());
+            plugin.getLogger().severe("Could not save shared bank " + id + ": " + exception.getMessage());
             return false;
         }
-    }
-
-    public boolean addTransaction(UUID uuid, String type, double amount, double balanceAfter, String note) {
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement(INSERT_TRANSACTION_SQL)) {
-            bindTransaction(statement, uuid, type, amount, balanceAfter, note);
-            statement.executeUpdate();
-            return true;
-        } catch (SQLException exception) {
-            plugin.getLogger().severe("Could not save bank transaction for " + uuid + ": " + exception.getMessage());
-            return false;
-        }
-    }
-
-    private String saveAccountSql() {
-        return mysql() ? """
-                INSERT INTO player_banks (uuid, username, balance, level, last_interest_claim, bonus_claimed, min_balance_since_claim)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON DUPLICATE KEY UPDATE
-                    username = VALUES(username),
-                    balance = VALUES(balance),
-                    level = VALUES(level),
-                    last_interest_claim = VALUES(last_interest_claim),
-                    bonus_claimed = VALUES(bonus_claimed),
-                    min_balance_since_claim = VALUES(min_balance_since_claim)
-                """ : """
-                INSERT INTO player_banks (uuid, username, balance, level, last_interest_claim, bonus_claimed, min_balance_since_claim)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(uuid) DO UPDATE SET
-                    username = excluded.username,
-                    balance = excluded.balance,
-                    level = excluded.level,
-                    last_interest_claim = excluded.last_interest_claim,
-                    bonus_claimed = excluded.bonus_claimed,
-                    min_balance_since_claim = excluded.min_balance_since_claim
-                """;
-    }
-
-    private void bindAccount(PreparedStatement statement, BankAccount account) throws SQLException {
-        statement.setString(1, account.uuid().toString());
-        statement.setString(2, account.username());
-        statement.setDouble(3, account.balance());
-        statement.setInt(4, account.level());
-        statement.setLong(5, account.lastInterestClaim());
-        statement.setInt(6, account.bonusClaimed() ? 1 : 0);
-        statement.setDouble(7, account.minBalanceSinceClaim());
     }
 
     private void bindTransaction(PreparedStatement statement, UUID uuid, String type, double amount, double balanceAfter, String note) throws SQLException {
@@ -570,22 +610,6 @@ public final class BankDatabase {
         statement.setDouble(4, balanceAfter);
         statement.setLong(5, java.time.Instant.now().getEpochSecond());
         statement.setString(6, note == null ? "" : note);
-    }
-
-    private void rollbackQuietly(Connection connection) {
-        try {
-            connection.rollback();
-        } catch (SQLException exception) {
-            plugin.getLogger().severe("Could not roll back failed bank write: " + exception.getMessage());
-        }
-    }
-
-    private void restoreAutoCommit(Connection connection, boolean value) {
-        try {
-            connection.setAutoCommit(value);
-        } catch (SQLException exception) {
-            plugin.getLogger().warning("Could not restore auto-commit: " + exception.getMessage());
-        }
     }
 
     public List<BankTransaction> getRecentTransactions(UUID uuid, int limit) {
