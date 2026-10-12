@@ -7,6 +7,7 @@ import com.mystipixel.royalbank.data.BankTransaction;
 import com.mystipixel.royalbank.gui.BankGui;
 import com.mystipixel.royalbank.message.MessageManager;
 import com.mystipixel.royalbank.security.AbuseMonitor;
+import com.mystipixel.royalbank.service.BalanceRefresher;
 import com.mystipixel.royalbank.service.BankService;
 import com.mystipixel.royalbank.util.Amounts;
 import org.bukkit.Bukkit;
@@ -73,13 +74,15 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         }
 
         if (args.length == 0) {
-            bankGui.openMain(player);
+            withFreshAccount(player, () -> bankGui.openMain(player));
             return true;
         }
 
         if (args[0].equalsIgnoreCase("balance")) {
-            messages.sendEach(player, bankService.describeBalance(player));
-            messages.send(player, "info.balance-hint");
+            withFreshAccount(player, () -> {
+                messages.sendEach(player, bankService.describeBalance(player));
+                messages.send(player, "info.balance-hint");
+            });
             return true;
         }
 
@@ -89,10 +92,20 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             case "transfer" -> handleTransfer(player, args);
             case "upgrade" -> handleUpgrade(player);
             case "interest" -> handleInterest(player);
-            case "info" -> messages.sendEach(player, bankService.describeNextUpgrade(player));
+            case "info" -> withFreshAccount(player, () -> messages.sendEach(player, bankService.describeNextUpgrade(player)));
             default -> messages.send(player, "unknown-command");
         }
         return true;
+    }
+
+    // on a shared database the cached row may be a few seconds old, so re-read it before showing it
+    private void withFreshAccount(Player player, Runnable show) {
+        BalanceRefresher refresher = plugin.getBalanceRefresher();
+        if (refresher == null) {
+            show.run();
+        } else {
+            refresher.refresh(player, show);
+        }
     }
 
     private boolean handleReload(CommandSender sender) {

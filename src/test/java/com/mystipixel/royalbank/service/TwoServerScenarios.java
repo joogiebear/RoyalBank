@@ -8,6 +8,8 @@ import com.mystipixel.royalbank.data.BankDatabase;
 import com.mystipixel.royalbank.hooks.VaultHook;
 import com.mystipixel.royalbank.message.MessageManager;
 import com.mystipixel.royalbank.message.TestMessages;
+import com.mystipixel.royalcommon.storage.DbExecutor;
+import com.mystipixel.royalcommon.storage.MainThread;
 import net.milkbowl.vault.economy.Economy;
 import net.milkbowl.vault.economy.EconomyResponse;
 import org.bukkit.Bukkit;
@@ -34,6 +36,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -45,6 +48,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -95,6 +99,8 @@ abstract class TwoServerScenarios {
     @AfterEach
     void stopServers() throws Exception {
         threads.shutdownNow();
+        a.db.shutdown(java.time.Duration.ofSeconds(10));
+        b.db.shutdown(java.time.Duration.ofSeconds(10));
         a.database.close();
         b.database.close();
         bukkit.close();
@@ -105,6 +111,9 @@ abstract class TwoServerScenarios {
         final BankDatabase database;
         final BankService service;
         final YamlConfiguration config;
+        final MainQueue main = new MainQueue();
+        final DbExecutor db;
+        final BalanceRefresher refresher;
 
         Server(String name) throws Exception {
             MessageManager messages = TestMessages.bundled(dataFolder);
@@ -138,10 +147,50 @@ abstract class TwoServerScenarios {
                     coopEvents.add(username + " " + action + " " + amount + (counterpartyName == null ? "" : " from " + counterpartyName));
                 }
             });
+            db = new DbExecutor("Bank-" + name, main, Logger.getLogger("TwoServers-" + name));
+            refresher = new BalanceRefresher(service.accountCache(), database, db);
+        }
+
+        // one timed poll as the scheduler would run it, then everything it queued for the main thread
+        Set<UUID> poll() {
+            Set<UUID> changed = refresher.poll().join();
+            settle();
+            return changed;
+        }
+
+        // waits for queued database work and runs what it handed to the main thread, until both are idle
+        void settle() {
+            do {
+                db.submit("settle", () -> null).join();
+            } while (main.drain());
+        }
+
+        double cachedBalance(Player player) {
+            return service.getCachedAccount(player.getUniqueId()).orElseThrow().balance();
         }
 
         BankAccount stored(UUID id) {
             return database.getAccount(id).orElseThrow();
+        }
+    }
+
+    // the server's main thread: work handed to it waits here until the test thread runs it
+    static final class MainQueue implements MainThread {
+        private final java.util.concurrent.LinkedBlockingQueue<Runnable> tasks = new java.util.concurrent.LinkedBlockingQueue<>();
+
+        @Override
+        public void execute(Runnable task) {
+            tasks.add(task);
+        }
+
+        boolean drain() {
+            boolean ran = false;
+            Runnable task;
+            while ((task = tasks.poll()) != null) {
+                task.run();
+                ran = true;
+            }
+            return ran;
         }
     }
 
@@ -488,5 +537,117 @@ abstract class TwoServerScenarios {
                 server.service.deposit(player, amount);
             }
         }
+    }
+
+    @Test
+    void aTransferOnTheOtherServerShowsInTheCacheAfterOnePoll() {
+        Player sender = account("Sender", 1_000.0);
+        Player steve = account("Steve", 100.0);
+        Player bystander = account("Bystander", 50.0);
+        a.service.loadAccount(steve);
+        a.service.loadAccount(bystander);
+        b.service.loadAccount(sender);
+        assertEquals(Set.of(), a.poll(), "nothing changed yet");
+
+        assertTrue(b.service.transfer(sender, steve, 500.0).success());
+        assertEquals(100.0, a.cachedBalance(steve), 1e-9, "A has not polled yet");
+
+        assertEquals(Set.of(steve.getUniqueId()), a.poll(), "only the changed row is reloaded");
+        assertEquals(600.0, a.cachedBalance(steve), 1e-9);
+        assertEquals(50.0, a.cachedBalance(bystander), 1e-9);
+        assertEquals(Set.of(), a.poll(), "a reloaded row is not reloaded again");
+    }
+
+    @Test
+    void anAdminChangeOnTheOtherServerShowsInTheCacheAfterOnePoll() {
+        Player steve = account("Steve", 100.0);
+        a.service.loadAccount(steve);
+        a.poll();
+
+        assertTrue(b.service.addBalance(steve, 1_000.0).success());
+        assertTrue(b.service.setLevel(steve, 2).success());
+
+        assertEquals(Set.of(steve.getUniqueId()), a.poll());
+        BankAccount cached = a.service.getCachedAccount(steve.getUniqueId()).orElseThrow();
+        assertEquals(1_100.0, cached.balance(), 1e-9);
+        assertEquals(2, cached.level());
+        assertEquals(a.stored(steve.getUniqueId()).version(), cached.version());
+    }
+
+    @Test
+    void thisServersOwnWritesAreNotReloaded() {
+        Player steve = account("Steve", 100.0);
+        wallets.set(steve.getUniqueId(), 500.0);
+        a.service.loadAccount(steve);
+        a.poll();
+
+        assertTrue(a.service.deposit(steve, 200.0).success());
+        assertTrue(a.service.withdraw(steve, 50.0).success());
+
+        assertEquals(Set.of(), a.poll());
+        assertEquals(250.0, a.cachedBalance(steve), 1e-9);
+    }
+
+    @Test
+    void aReloadThatLandsAfterANewerLocalWriteIsIgnored() {
+        Player steve = account("Steve", 100.0);
+        wallets.set(steve.getUniqueId(), 500.0);
+        a.service.loadAccount(steve);
+        a.poll();
+        assertTrue(b.service.addBalance(steve, 1_000.0).success());
+
+        // the poll notices B's change and A's main thread asks for the row, which the database thread reads
+        assertEquals(Set.of(steve.getUniqueId()), a.refresher.poll().join());
+        a.main.drain();
+        a.db.submit("wait for the reload read", () -> null).join();
+        // before the reloaded row reaches the main thread, a deposit on A writes a newer one
+        assertTrue(a.service.deposit(steve, 10.0).success());
+        a.settle();
+
+        assertEquals(1_110.0, a.cachedBalance(steve), 1e-9, "the older reloaded row did not replace the deposit");
+        assertEquals(a.stored(steve.getUniqueId()).version(), a.service.getCachedAccount(steve.getUniqueId()).orElseThrow().version());
+    }
+
+    @Test
+    void aReloadForAPlayerWhoLeftDoesNotCacheThemAgain() {
+        Player steve = account("Steve", 100.0);
+        a.service.loadAccount(steve);
+        a.poll();
+        assertTrue(b.service.addBalance(steve, 1_000.0).success());
+
+        a.refresher.poll().join();
+        a.service.unloadAccount(steve.getUniqueId());
+        a.settle();
+
+        assertTrue(a.service.getCachedAccount(steve.getUniqueId()).isEmpty());
+    }
+
+    @Test
+    void openingTheBankReadsTheRowBeforeShowingIt() {
+        Player sender = account("Sender", 1_000.0);
+        Player steve = account("Steve", 100.0);
+        a.service.loadAccount(steve);
+        assertTrue(b.service.transfer(sender, steve, 300.0).success());
+        List<Double> shown = new ArrayList<>();
+
+        a.refresher.refresh(steve, () -> shown.add(a.service.getAccount(steve).balance()));
+        assertEquals(List.of(), shown, "nothing is shown before the read finished");
+        a.settle();
+
+        assertEquals(List.of(400.0), shown);
+        assertEquals(Set.of(), a.poll(), "the refreshed row counts as seen");
+    }
+
+    @Test
+    void openingTheBankForAPlayerWhoLeftShowsNothing() {
+        Player steve = account("Steve", 100.0);
+        a.service.loadAccount(steve);
+        List<String> shown = new ArrayList<>();
+        when(steve.isOnline()).thenReturn(false);
+
+        a.refresher.refresh(steve, () -> shown.add("menu"));
+        a.settle();
+
+        assertEquals(List.of(), shown);
     }
 }

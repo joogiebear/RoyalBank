@@ -215,6 +215,10 @@ auction sale before it ever reaches the bank.
   because of plugin load order.
 - Online players' accounts are cached in memory (loaded on join, evicted on quit); GUI menus and
   PlaceholderAPI read from the cache instead of querying the database.
+- Several servers can share one MySQL database. Every balance change locks the account row, so no
+  server overwrites another's change, and balances shown to online players update within
+  `storage.refresh-seconds` (default 5). `/bank`, `/bank balance` and `/bank info` re-read the player's
+  account first. Database work still runs on the main thread until a later release.
 - The database uses WAL mode with a busy timeout. Transaction pruning and backups run asynchronously
   on dedicated connections.
 - Existing databases are migrated automatically on startup (a `bonus_claimed` column is added).
