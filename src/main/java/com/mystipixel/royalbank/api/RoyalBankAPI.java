@@ -29,10 +29,10 @@ public interface RoyalBankAPI {
     /** Reset a player's account to a fresh starting account (new profile). Blocks. */
     void resetAccount(UUID playerId);
 
-    /** Blocks. */
+    /** Blocks; {@link #getAccountBalanceAsync} does not. */
     double getAccountBalance(UUID accountId);
 
-    /** Blocks. */
+    /** Blocks; {@link #getAccountViewAsync} does not. */
     AccountView getAccountView(UUID accountId, String label);
 
     /** Blocks; {@link #accountDepositAsync} does not. */
@@ -41,14 +41,34 @@ public interface RoyalBankAPI {
     /** Blocks; {@link #accountWithdrawAsync} does not. */
     String accountWithdraw(Player purse, UUID accountId, String label, double amount);
 
-    /** Blocks. */
+    /** Blocks; {@link #getUpgradeViewAsync} does not. */
     UpgradeView getUpgradeView(UUID accountId, String label);
 
     /** Blocks; {@link #accountUpgradeAsync} does not. */
     String accountUpgrade(Player purse, UUID accountId, String label);
 
-    /** Blocks. */
+    /** Blocks; {@link #getAccountTransactionsAsync} does not. */
     List<TransactionView> getAccountTransactions(UUID accountId, int limit);
+
+    /** {@link #getAccountBalance} without blocking; completes on the main thread. */
+    default CompletableFuture<Double> getAccountBalanceAsync(UUID accountId) {
+        return CompletableFuture.completedFuture(getAccountBalance(accountId));
+    }
+
+    /** {@link #getAccountView} without blocking; completes on the main thread. */
+    default CompletableFuture<AccountView> getAccountViewAsync(UUID accountId, String label) {
+        return CompletableFuture.completedFuture(getAccountView(accountId, label));
+    }
+
+    /** {@link #getUpgradeView} without blocking; completes on the main thread. */
+    default CompletableFuture<UpgradeView> getUpgradeViewAsync(UUID accountId, String label) {
+        return CompletableFuture.completedFuture(getUpgradeView(accountId, label));
+    }
+
+    /** {@link #getAccountTransactions} without blocking; completes on the main thread. */
+    default CompletableFuture<List<TransactionView>> getAccountTransactionsAsync(UUID accountId, int limit) {
+        return CompletableFuture.completedFuture(getAccountTransactions(accountId, limit));
+    }
 
     /** {@link #accountDeposit} without blocking; completes on the main thread with the same result. */
     default CompletableFuture<String> accountDepositAsync(Player purse, UUID accountId, String label, double amount) {

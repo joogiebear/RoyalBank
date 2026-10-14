@@ -291,6 +291,10 @@ class BankDbThreadTest {
         service.importAccount(alex.getUniqueId(), new BankSnapshot(7.0, 1, 0L, true));
         assertEquals(7.0, service.exportAccount(alex.getUniqueId()).balance(), 1e-9);
         assertEquals(5, service.getAccountTransactions(coop, 10).size());
+        assertEquals(200.0, run(service.getAccountBalanceAsync(coop)), 1e-9);
+        assertEquals(5, run(service.getAccountTransactionsAsync(coop, 10)).size());
+        assertEquals(2, run(service.getAccountViewAsync(coop, "Coop")).level());
+        assertTrue(run(service.getUpgradeViewAsync(coop, "Coop")).maxed());
         assertEquals(2, service.getAccountView(coop, "Coop").level());
         assertTrue(service.getUpgradeView(coop, "Coop").maxed());
         threads.settle();

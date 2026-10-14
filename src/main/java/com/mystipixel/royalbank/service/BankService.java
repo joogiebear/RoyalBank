@@ -70,6 +70,7 @@ public final class BankService implements Listener, RoyalBankAPI {
     private static final long LOGIN_LOAD_TIMEOUT_SECONDS = 10L;
     // a login that never turned into a join (kicked, banned) leaves its preloaded row this long at most
     private static final long PRELOAD_KEEP_NANOS = TimeUnit.MINUTES.toNanos(1);
+    private static final int PRUNE_BATCH = 200;
 
     private final JavaPlugin plugin;
     private final BankDatabase database;
@@ -604,15 +605,35 @@ public final class BankService implements Listener, RoyalBankAPI {
 
     @Override
     public double getAccountBalance(UUID accountId) {
-        return round(onDbBlocking("read shared account " + accountId, () -> database.getAccount(accountId)).join()
-                .map(BankAccount::balance).orElse(0.0));
+        return accountBalance(accountId, true).join();
+    }
+
+    @Override
+    public CompletableFuture<Double> getAccountBalanceAsync(UUID accountId) {
+        return accountBalance(accountId, false);
+    }
+
+    private CompletableFuture<Double> accountBalance(UUID accountId, boolean blocking) {
+        return onDb(blocking, "read shared account " + accountId, () -> database.getAccount(accountId))
+                .thenApply(account -> round(account.map(BankAccount::balance).orElse(0.0)));
     }
 
     @Override
     public AccountView getAccountView(UUID accountId, String label) {
-        BankAccount account = onDbBlocking("read shared account " + accountId, () -> loadAccountById(accountId, label)).join();
-        BankLevel level = getEffectiveLevel(account.level());
-        return new AccountView(round(account.balance()), account.level(), level.name(), level.maxBalance());
+        return accountView(accountId, label, true).join();
+    }
+
+    @Override
+    public CompletableFuture<AccountView> getAccountViewAsync(UUID accountId, String label) {
+        return accountView(accountId, label, false);
+    }
+
+    private CompletableFuture<AccountView> accountView(UUID accountId, String label, boolean blocking) {
+        return onDb(blocking, "read shared account " + accountId, () -> loadAccountById(accountId, label))
+                .thenApply(account -> {
+                    BankLevel level = getEffectiveLevel(account.level());
+                    return new AccountView(round(account.balance()), account.level(), level.name(), level.maxBalance());
+                });
     }
 
     @Override
@@ -641,7 +662,20 @@ public final class BankService implements Listener, RoyalBankAPI {
 
     @Override
     public UpgradeView getUpgradeView(UUID accountId, String label) {
-        BankAccount account = onDbBlocking("read shared account " + accountId, () -> loadAccountById(accountId, label)).join();
+        return upgradeView(accountId, label, true).join();
+    }
+
+    @Override
+    public CompletableFuture<UpgradeView> getUpgradeViewAsync(UUID accountId, String label) {
+        return upgradeView(accountId, label, false);
+    }
+
+    private CompletableFuture<UpgradeView> upgradeView(UUID accountId, String label, boolean blocking) {
+        return onDb(blocking, "read shared account " + accountId, () -> loadAccountById(accountId, label))
+                .thenApply(this::upgradeViewOf);
+    }
+
+    private UpgradeView upgradeViewOf(BankAccount account) {
         BankLevel next = levelManager.getNextLevel(account.level()).orElse(null);
         if (next == null) {
             return new UpgradeView(true, account.level(), "", 0.0, "", getEffectiveLevel(account.level()).maxBalance());
@@ -892,12 +926,23 @@ public final class BankService implements Listener, RoyalBankAPI {
 
     @Override
     public List<TransactionView> getAccountTransactions(UUID accountId, int limit) {
-        List<TransactionView> out = new ArrayList<>();
-        for (BankTransaction t : onDbBlocking("read shared account transactions " + accountId,
-                () -> database.getRecentTransactions(accountId, limit)).join()) {
-            out.add(new TransactionView(t.type(), t.amount(), t.balanceAfter(), t.createdAt(), t.note()));
-        }
-        return out;
+        return accountTransactions(accountId, limit, true).join();
+    }
+
+    @Override
+    public CompletableFuture<List<TransactionView>> getAccountTransactionsAsync(UUID accountId, int limit) {
+        return accountTransactions(accountId, limit, false);
+    }
+
+    private CompletableFuture<List<TransactionView>> accountTransactions(UUID accountId, int limit, boolean blocking) {
+        return onDb(blocking, "read shared account transactions " + accountId,
+                () -> database.getRecentTransactions(accountId, limit)).thenApply(rows -> {
+                    List<TransactionView> out = new ArrayList<>(rows.size());
+                    for (BankTransaction t : rows) {
+                        out.add(new TransactionView(t.type(), t.amount(), t.balanceAfter(), t.createdAt(), t.note()));
+                    }
+                    return out;
+                });
     }
 
     public CompletableFuture<OperationResult> upgrade(Player player) {
@@ -1114,9 +1159,20 @@ public final class BankService implements Listener, RoyalBankAPI {
         return onDb("read transactions of " + account, () -> database.getRecentTransactions(account, limit));
     }
 
-    // queued behind bank actions, so on SQLite's single connection they wait instead of freezing the server
+    // queued behind bank actions, so on SQLite's single connection they wait instead of freezing the server;
+    // one batch of accounts per task, so logins and bank actions get the database thread between batches
     public CompletableFuture<Integer> pruneTransactions(int maxPerPlayer) {
-        return onDb("prune bank transactions", () -> database.pruneTransactions(maxPerPlayer));
+        return onDb("prune bank transactions", () -> database.accountsOverTransactionLimit(maxPerPlayer))
+                .thenCompose(accounts -> pruneBatches(accounts, 0, maxPerPlayer, 0));
+    }
+
+    private CompletableFuture<Integer> pruneBatches(List<String> accounts, int from, int maxPerPlayer, int removed) {
+        if (from >= accounts.size()) {
+            return done(removed);
+        }
+        List<String> batch = accounts.subList(from, Math.min(accounts.size(), from + PRUNE_BATCH));
+        return onDb("prune bank transactions", () -> database.pruneTransactions(batch, maxPerPlayer))
+                .thenCompose(count -> pruneBatches(accounts, from + PRUNE_BATCH, maxPerPlayer, removed + count));
     }
 
     public CompletableFuture<Boolean> backup(Path target) {

@@ -251,7 +251,6 @@ public final class RoyalBankPlugin extends JavaPlugin {
             bankGui.reload();
         }
         new ConfigValidator(this, levelManager).validate();
-        pruneTransactionsIfEnabled();
         startBalanceRefresher();
     }
 

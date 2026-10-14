@@ -19,6 +19,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
@@ -48,9 +49,11 @@ public final class BankDatabase {
 
     private static final String INSERT_TRANSACTION_SQL =
             "INSERT INTO bank_transactions (uuid, type, amount, balance_after, created_at, note) VALUES (?, ?, ?, ?, ?, ?)";
-    private static final String SELECT_ACCOUNT_SQL =
+    private static final String SELECT_ACCOUNT_COLUMNS =
             "SELECT uuid, username, balance, level, last_interest_claim, bonus_claimed,"
-                    + " COALESCE(min_balance_since_claim, balance) AS min_balance, version FROM player_banks WHERE uuid = ?";
+                    + " COALESCE(min_balance_since_claim, balance) AS min_balance, version FROM player_banks";
+    private static final String SELECT_ACCOUNT_SQL = SELECT_ACCOUNT_COLUMNS + " WHERE uuid = ?";
+    private static final int ACCOUNTS_PER_QUERY = 500;
     private static final String UPDATE_ACCOUNT_SQL =
             "UPDATE player_banks SET username = ?, balance = ?, level = ?, last_interest_claim = ?, bonus_claimed = ?,"
                     + " min_balance_since_claim = ?, version = version + 1 WHERE uuid = ?";
@@ -379,13 +382,19 @@ public final class BankDatabase {
     /** The stored rows of these accounts in one connection; ids without a row are left out. */
     public List<BankAccount> getAccounts(Collection<UUID> ids) throws SQLException {
         List<BankAccount> accounts = new ArrayList<>(ids.size());
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement(SELECT_ACCOUNT_SQL)) {
-            for (UUID id : ids) {
-                statement.setString(1, id.toString());
-                try (ResultSet resultSet = statement.executeQuery()) {
-                    if (resultSet.next()) {
-                        accounts.add(readAccount(resultSet));
+        List<UUID> idList = new ArrayList<>(ids);
+        try (Connection connection = dataSource.getConnection()) {
+            for (int from = 0; from < idList.size(); from += ACCOUNTS_PER_QUERY) {
+                List<UUID> chunk = idList.subList(from, Math.min(idList.size(), from + ACCOUNTS_PER_QUERY));
+                String sql = SELECT_ACCOUNT_COLUMNS + " WHERE uuid IN (" + String.join(", ", Collections.nCopies(chunk.size(), "?")) + ")";
+                try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                    for (int i = 0; i < chunk.size(); i++) {
+                        statement.setString(i + 1, chunk.get(i).toString());
+                    }
+                    try (ResultSet resultSet = statement.executeQuery()) {
+                        while (resultSet.next()) {
+                            accounts.add(readAccount(resultSet));
+                        }
                     }
                 }
             }
@@ -687,30 +696,62 @@ public final class BankDatabase {
         return transactions;
     }
 
-    // the window function needs SQLite 3.25+ or MySQL 8+
-    public int pruneTransactions(int maxPerPlayer) {
+    /** Accounts with more than maxPerPlayer ledger rows. */
+    public List<String> accountsOverTransactionLimit(int maxPerPlayer) {
+        List<String> accounts = new ArrayList<>();
         if (maxPerPlayer <= 0) {
-            return 0;
+            return accounts;
         }
-        String sql = """
-                DELETE FROM bank_transactions
-                WHERE id NOT IN (
-                    SELECT id FROM (
-                        SELECT id,
-                               ROW_NUMBER() OVER (PARTITION BY uuid ORDER BY created_at DESC, id DESC) AS rn
-                        FROM bank_transactions
-                    ) ranked
-                    WHERE ranked.rn <= ?
-                )
-                """;
+        String sql = "SELECT uuid FROM bank_transactions GROUP BY uuid HAVING COUNT(*) > ?";
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setInt(1, maxPerPlayer);
-            return statement.executeUpdate();
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    accounts.add(resultSet.getString(1));
+                }
+            }
         } catch (SQLException exception) {
-            plugin.getLogger().warning("Could not prune bank transactions: " + exception.getMessage());
+            plugin.getLogger().warning("Could not find bank transactions to prune: " + exception.getMessage());
+        }
+        return accounts;
+    }
+
+    // keeps each account's newest maxPerPlayer rows; one short delete per account instead of one over the whole table
+    public int pruneTransactions(List<String> accounts, int maxPerPlayer) {
+        if (maxPerPlayer <= 0 || accounts.isEmpty()) {
             return 0;
         }
+        String cutoffSql = "SELECT created_at, id FROM bank_transactions WHERE uuid = ?"
+                + " ORDER BY created_at DESC, id DESC LIMIT 1 OFFSET ?";
+        String deleteSql = "DELETE FROM bank_transactions WHERE uuid = ?"
+                + " AND (created_at < ? OR (created_at = ? AND id <= ?))";
+        int removed = 0;
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement cutoff = connection.prepareStatement(cutoffSql);
+             PreparedStatement delete = connection.prepareStatement(deleteSql)) {
+            for (String account : accounts) {
+                cutoff.setString(1, account);
+                cutoff.setInt(2, maxPerPlayer);
+                long createdAt;
+                long id;
+                try (ResultSet resultSet = cutoff.executeQuery()) {
+                    if (!resultSet.next()) {
+                        continue;
+                    }
+                    createdAt = resultSet.getLong(1);
+                    id = resultSet.getLong(2);
+                }
+                delete.setString(1, account);
+                delete.setLong(2, createdAt);
+                delete.setLong(3, createdAt);
+                delete.setLong(4, id);
+                removed += delete.executeUpdate();
+            }
+        } catch (SQLException exception) {
+            plugin.getLogger().warning("Could not prune bank transactions: " + exception.getMessage());
+        }
+        return removed;
     }
 
     /** {@code null} on MySQL. */
