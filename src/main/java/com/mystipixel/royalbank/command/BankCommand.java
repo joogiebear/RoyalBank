@@ -194,9 +194,9 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             messages.send(player, "transfer.usage");
             return;
         }
-        OfflinePlayer target = Bukkit.getOfflinePlayer(args[1]);
+        OfflinePlayer target = knownPlayer(args[1]);
         // Reject names that have never joined, so a typo cannot silently create a junk "ghost" account.
-        if (!target.hasPlayedBefore() && !target.isOnline()) {
+        if (target == null || (!target.hasPlayedBefore() && !target.isOnline())) {
             messages.send(player, "admin.unknown-player", "player", args[1]);
             return;
         }
@@ -390,13 +390,20 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             messages.send(sender, "admin.missing-player");
             return null;
         }
-        OfflinePlayer player = Bukkit.getOfflinePlayer(args[index]);
+        OfflinePlayer player = knownPlayer(args[index]);
         // Reject names that have never joined, so a typo cannot silently create a junk "ghost" account.
-        if (!player.hasPlayedBefore() && !player.isOnline()) {
+        if (player == null || (!player.hasPlayedBefore() && !player.isOnline())) {
             messages.send(sender, "admin.unknown-player", "player", args[index]);
             return null;
         }
         return player;
+    }
+
+    // Online or in this server's user cache only: getOfflinePlayer(String) blocks the main thread on a
+    // Mojang lookup for an unknown name, and players can type any name they like.
+    private static OfflinePlayer knownPlayer(String name) {
+        Player online = Bukkit.getPlayerExact(name);
+        return online != null ? online : Bukkit.getOfflinePlayerIfCached(name);
     }
 
     private Double parseAmount(Player player, String[] args, String usageKey) {
