@@ -10,8 +10,8 @@ import java.util.UUID;
 // against them. Works on the account's coop_contributions rows, read in the withdrawal's own transaction.
 final class CoopContributions {
 
-    // depositor null: no known depositor for this part of the withdrawal
-    record Share(UUID depositor, String depositorName, double amount) {
+    // depositor null: no known depositor for this part of the withdrawal; seq is the depositor's row order
+    record Share(UUID depositor, String depositorName, double amount, long seq) {
     }
 
     static final double EPSILON = 1e-6;
@@ -38,7 +38,7 @@ final class CoopContributions {
             }
         }
         if (remaining > EPSILON) {
-            shares.add(new Share(null, null, remaining));
+            shares.add(new Share(null, null, remaining, 0L));
         }
         return shares;
     }
@@ -53,12 +53,23 @@ final class CoopContributions {
         return changes;
     }
 
+    // undoes withdrawalChanges; a depositor row the withdrawal emptied comes back in its old place
+    static List<CoopContribution> returnedChanges(UUID account, List<Share> shares) {
+        List<CoopContribution> changes = new ArrayList<>();
+        for (Share share : shares) {
+            if (share.depositor() != null) {
+                changes.add(new CoopContribution(account, share.depositor(), share.depositorName(), share.amount(), share.seq()));
+            }
+        }
+        return changes;
+    }
+
     private static double take(CoopContribution deposit, double remaining, List<Share> shares) {
         if (deposit.amount() <= EPSILON || remaining <= EPSILON) {
             return remaining;
         }
         double taken = Math.min(remaining, deposit.amount());
-        shares.add(new Share(deposit.member(), deposit.memberName(), taken));
+        shares.add(new Share(deposit.member(), deposit.memberName(), taken, deposit.seq()));
         return remaining - taken;
     }
 }

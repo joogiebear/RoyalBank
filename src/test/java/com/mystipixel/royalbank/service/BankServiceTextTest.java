@@ -52,6 +52,7 @@ class BankServiceTextTest {
     private BankDatabase database;
     private Economy economy;
     private Player player;
+    private final TestThreads threads = new TestThreads("Bank-Test");
     private BankService service;
 
     @BeforeEach
@@ -77,17 +78,22 @@ class BankServiceTextTest {
         player = mock(Player.class);
         when(player.getUniqueId()).thenReturn(UUID.randomUUID());
         when(player.getName()).thenReturn("Steve");
-        service = new BankService(plugin, database, levels, vault, messages);
+        service = new BankService(plugin, database, levels, vault, messages, threads.db);
     }
 
     @AfterEach
     void tearDown() {
+        threads.shutdown();
         database.close();
         bukkit.close();
     }
 
     private void account(double balance, int level) {
         assertTrue(database.saveAccount(new BankAccount(player.getUniqueId(), "Steve", balance, level, 0L, false)));
+    }
+
+    private <T> T run(java.util.concurrent.CompletableFuture<T> action) {
+        return threads.run(action);
     }
 
     @Test
@@ -97,7 +103,7 @@ class BankServiceTextTest {
         when(economy.withdrawPlayer(player, 100.0))
                 .thenReturn(new EconomyResponse(100.0, 0.0, EconomyResponse.ResponseType.SUCCESS, null));
 
-        OperationResult result = service.deposit(player, 100.0);
+        OperationResult result = run(service.deposit(player, 100.0));
 
         assertTrue(result.success());
         assertEquals("&aDeposited $100.00 &aand received a first deposit bonus of &e$10.00&a!", messages.render(result));
@@ -109,9 +115,9 @@ class BankServiceTextTest {
     @Test
     void failuresReadAsBefore() {
         account(50.0, 1);
-        assertEquals("&cAmount must be at least $0.01.", messages.render(service.deposit(player, 0.0)));
-        assertEquals("&cYour bank does not have that much money.", messages.render(service.withdraw(player, 500.0)));
-        assertEquals("&cYou cannot transfer money to yourself.", messages.render(service.transfer(player, player, 5.0)));
+        assertEquals("&cAmount must be at least $0.01.", messages.render(run(service.deposit(player, 0.0))));
+        assertEquals("&cYour bank does not have that much money.", messages.render(run(service.withdraw(player, 500.0))));
+        assertEquals("&cYou cannot transfer money to yourself.", messages.render(run(service.transfer(player, player, 5.0))));
         assertEquals("&cManual interest claiming is disabled.", render(false));
     }
 
@@ -120,18 +126,18 @@ class BankServiceTextTest {
         var config = TestMessages.bundledConfig();
         config.set("settings.interest-command-enabled", interestCommandEnabled);
         when(plugin.getConfig()).thenReturn(config);
-        BankService other = new BankService(plugin, database, mock(LevelManager.class), mock(VaultHook.class), messages);
-        return messages.render(other.claimInterest(player, true));
+        BankService other = new BankService(plugin, database, mock(LevelManager.class), mock(VaultHook.class), messages, threads.db);
+        return messages.render(run(other.claimInterest(player, true)));
     }
 
     @Test
     void autoClaimWithNothingToPayIsSilent() {
         account(0.0, 1);
-        OperationResult result = service.claimInterest(player, false);
+        OperationResult result = run(service.claimInterest(player, false));
         assertTrue(result.success());
         assertNull(result.key());
         assertEquals("&eNo interest was earned because your bank balance is empty.",
-                messages.render(service.claimInterest(player, true)));
+                messages.render(run(service.claimInterest(player, true))));
     }
 
     @Test
@@ -151,6 +157,8 @@ class BankServiceTextTest {
     @Test
     void infoLinesReadAsBefore() {
         account(1_000.0, 1);
+        when(player.isOnline()).thenReturn(true);
+        run(service.loadAccount(player));
         when(economy.getBalance(player)).thenReturn(20_000_000.0);
 
         String before = "&eNext Level: &f" + 2 + " - " + "Gold Account"
@@ -177,7 +185,7 @@ class BankServiceTextTest {
         when(inventory.getContents()).thenReturn(new org.bukkit.inventory.ItemStack[0]);
         when(player.getInventory()).thenReturn(inventory);
 
-        OperationResult result = service.upgrade(player);
+        OperationResult result = run(service.upgrade(player));
 
         assertFalse(result.success());
         assertEquals("&cMissing upgrade items: &f" + "64x Gold Block" + " (have " + 0 + ")", messages.render(result));

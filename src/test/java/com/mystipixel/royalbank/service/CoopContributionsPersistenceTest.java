@@ -63,6 +63,7 @@ class CoopContributionsPersistenceTest {
     private LevelManager levels;
     private VaultHook vault;
     private BankDatabase database;
+    private final TestThreads threads = new TestThreads("Bank-Test");
     private BankService service;
     private final List<Event> events = new ArrayList<>();
     private final UUID coop = UUID.randomUUID();
@@ -93,6 +94,7 @@ class CoopContributionsPersistenceTest {
 
     @AfterEach
     void tearDown() {
+        threads.shutdown();
         database.close();
         bukkit.close();
     }
@@ -101,7 +103,7 @@ class CoopContributionsPersistenceTest {
     private void start() {
         database = new BankDatabase(plugin);
         assertTrue(database.connect());
-        service = new BankService(plugin, database, levels, vault, messages);
+        service = new BankService(plugin, database, levels, vault, messages, threads.db);
         service.setAuditSink((uuid, username, action, amount, oldBalance, newBalance, incoming, counterparty, counterpartyName) -> {
             if (action.startsWith("coop-withdrew") || action.equals("coop-received")) {
                 events.add(new Event(uuid, action, amount, incoming, counterparty));
@@ -132,6 +134,10 @@ class CoopContributionsPersistenceTest {
         when(player.getUniqueId()).thenReturn(UUID.randomUUID());
         when(player.getName()).thenReturn(name);
         return player;
+    }
+
+    private <T> T run(java.util.concurrent.CompletableFuture<T> action) {
+        return threads.run(action);
     }
 
     @Test

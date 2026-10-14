@@ -157,7 +157,8 @@ plugins/RoyalBank/backups/
 ```
 
 The backup command uses SQLite `VACUUM INTO` instead of copying the live database file directly, and
-runs off the main thread so large databases do not stall the server.
+runs on the bank's database thread so large databases do not stall the server. Bank actions made
+while it runs wait for it to finish.
 
 ## Anti-abuse / RMT detection
 
@@ -213,14 +214,22 @@ auction sale before it ever reaches the bank.
   moment it enables. Vault being a hard dependency says nothing about the *economy plugin*, which is a
   separate plugin and may register its provider later — disabling would mean killing the plugin purely
   because of plugin load order.
-- Online players' accounts are cached in memory (loaded on join, evicted on quit); GUI menus and
-  PlaceholderAPI read from the cache instead of querying the database.
+- Online players' accounts are cached in memory (loaded while the player logs in, evicted on quit);
+  GUI menus and PlaceholderAPI read from the cache instead of querying the database.
 - Several servers can share one MySQL database. Every balance change locks the account row, so no
   server overwrites another's change, and balances shown to online players update within
   `storage.refresh-seconds` (default 5). `/bank`, `/bank balance` and `/bank info` re-read the player's
-  account first. Database work still runs on the main thread until a later release.
-- The database uses WAL mode with a busy timeout. Transaction pruning and backups run asynchronously
-  on dedicated connections.
+  account first.
+- Database work runs on its own thread, one job at a time in order, never on the server's main thread.
+  The purse (Vault), menus and chat stay on the main thread, so a bank action completes a tick or two
+  after the click. A player can run one bank action at a time; a second click while the first is being
+  saved shows `general.busy`. Money always leaves its old place before it reaches the new one, and the
+  first step is reversed if the second fails (a withdrawal the purse refuses goes back into the bank).
+  On shutdown, actions already started are finished before the database closes.
+- The database uses WAL mode with a busy timeout. Transaction pruning and backups run on the same
+  database thread, so on SQLite they queue with bank actions instead of holding up the server.
+- `RoyalBankAPI` methods that return a value wait for the database thread. The shared-account actions
+  also have `accountDepositAsync`, `accountWithdrawAsync` and `accountUpgradeAsync`, which do not.
 - Existing databases are migrated automatically on startup (a `bonus_claimed` column is added).
 
 ## Production notes

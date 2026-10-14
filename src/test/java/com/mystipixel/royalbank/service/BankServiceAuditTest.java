@@ -57,6 +57,7 @@ class BankServiceAuditTest {
     private YamlConfiguration config;
     private BankDatabase database;
     private Economy economy;
+    private final TestThreads threads = new TestThreads("Bank-Test");
     private BankService service;
     private final List<Event> events = new ArrayList<>();
 
@@ -84,13 +85,14 @@ class BankServiceAuditTest {
                 .thenAnswer(i -> new EconomyResponse(i.getArgument(1), 0.0, EconomyResponse.ResponseType.SUCCESS, null));
         VaultHook vault = mock(VaultHook.class);
         when(vault.getEconomy()).thenReturn(economy);
-        service = new BankService(plugin, database, levels, vault, messages);
+        service = new BankService(plugin, database, levels, vault, messages, threads.db);
         service.setAuditSink((uuid, username, action, amount, oldBalance, newBalance, incoming, counterparty, counterpartyName) ->
                 events.add(new Event(uuid, action, amount, incoming, counterparty, counterpartyName)));
     }
 
     @AfterEach
     void tearDown() {
+        threads.shutdown();
         database.close();
         bukkit.close();
     }
@@ -115,12 +117,16 @@ class BankServiceAuditTest {
         }
     }
 
+    private <T> T run(java.util.concurrent.CompletableFuture<T> action) {
+        return threads.run(action);
+    }
+
     @Test
     void ownDepositAndWithdrawalAreNotIncoming() {
         Player steve = player("Steve", 1_000.0);
 
-        assertTrue(service.deposit(steve, 100.0).success());
-        assertTrue(service.withdraw(steve, 50.0).success());
+        assertTrue(run(service.deposit(steve, 100.0)).success());
+        assertTrue(run(service.withdraw(steve, 50.0)).success());
 
         assertEquals(List.of(
                 new Event(steve.getUniqueId(), "deposited", 100.0, false, null, null),
@@ -132,7 +138,7 @@ class BankServiceAuditTest {
         Player steve = player("Steve", 1_000.0);
         Player alex = player("Alex", 0.0);
 
-        assertTrue(service.transfer(steve, alex, 200.0).success());
+        assertTrue(run(service.transfer(steve, alex, 200.0)).success());
 
         assertEquals(List.of(
                 new Event(steve.getUniqueId(), "transfer-sent", 200.0, false, alex.getUniqueId(), "Alex"),
@@ -142,11 +148,11 @@ class BankServiceAuditTest {
     @Test
     void interestIsIncomingWithoutCounterpartyWhetherPaidToBankOrPurse() {
         Player steve = player("Steve", 1_000.0);
-        assertTrue(service.claimInterest(steve, true).success());
+        assertTrue(run(service.claimInterest(steve, true)).success());
 
         config.set("settings.pay-interest-to-bank", false);
         Player alex = player("Alex", 1_000.0);
-        assertTrue(service.claimInterest(alex, true).success());
+        assertTrue(run(service.claimInterest(alex, true)).success());
 
         assertEquals(List.of(
                 new Event(steve.getUniqueId(), "interest", 20.0, true, null, null),
@@ -215,8 +221,8 @@ class BankServiceAuditTest {
         UUID coop = UUID.randomUUID();
         coopBalance(coop, 500.0);
 
-        assertTrue(service.deposit(steve, 100.0).success());
-        assertTrue(service.withdraw(steve, 100.0).success());
+        assertTrue(run(service.deposit(steve, 100.0)).success());
+        assertTrue(run(service.withdraw(steve, 100.0)).success());
         assertNull(service.accountWithdraw(steve, coop, "Coop", 100.0));
     }
 }

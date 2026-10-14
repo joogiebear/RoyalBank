@@ -52,6 +52,7 @@ class BankServiceInterestTest {
     private MockedStatic<Bukkit> bukkit;
     private YamlConfiguration config;
     private BankDatabase database;
+    private final TestThreads threads = new TestThreads("Bank-Test");
     private BankService service;
     private final List<Double> interestPaid = new ArrayList<>();
 
@@ -81,7 +82,7 @@ class BankServiceInterestTest {
                 .thenAnswer(i -> new EconomyResponse(i.getArgument(1), 0.0, EconomyResponse.ResponseType.SUCCESS, null));
         VaultHook vault = mock(VaultHook.class);
         when(vault.getEconomy()).thenReturn(economy);
-        service = new BankService(plugin, database, levels, vault, messages);
+        service = new BankService(plugin, database, levels, vault, messages, threads.db);
         service.setAuditSink((uuid, username, action, amount, oldBalance, newBalance, incoming, counterparty, counterpartyName) -> {
             if (action.startsWith("interest")) {
                 interestPaid.add(amount);
@@ -91,6 +92,7 @@ class BankServiceInterestTest {
 
     @AfterEach
     void tearDown() {
+        threads.shutdown();
         database.close();
         bukkit.close();
     }
@@ -111,20 +113,24 @@ class BankServiceInterestTest {
         return interestPaid.stream().mapToDouble(Double::doubleValue).sum();
     }
 
+    private <T> T run(java.util.concurrent.CompletableFuture<T> action) {
+        return threads.run(action);
+    }
+
     @Test
     void oneBankrollPassedAroundAltsEarnsOnce() {
         Player main = player("Main", 1_000_000.0);
         Player alt1 = player("Alt1", 0.0);
         Player alt2 = player("Alt2", 0.0);
 
-        assertTrue(service.claimInterest(main, true).success());
+        assertTrue(run(service.claimInterest(main, true)).success());
         double pile = stored(main).balance();
-        assertTrue(service.transfer(main, alt1, pile).success());
-        assertTrue(service.claimInterest(alt1, true).success());
-        assertTrue(service.transfer(alt1, alt2, pile).success());
-        assertTrue(service.claimInterest(alt2, true).success());
-        assertTrue(service.transfer(alt2, main, pile).success());
-        assertTrue(service.claimInterest(main, true).success());
+        assertTrue(run(service.transfer(main, alt1, pile)).success());
+        assertTrue(run(service.claimInterest(alt1, true)).success());
+        assertTrue(run(service.transfer(alt1, alt2, pile)).success());
+        assertTrue(run(service.claimInterest(alt2, true)).success());
+        assertTrue(run(service.transfer(alt2, main, pile)).success());
+        assertTrue(run(service.claimInterest(main, true)).success());
 
         assertEquals(List.of(20_000.0), interestPaid);
         assertEquals(1_020_000.0, stored(main).balance());
@@ -134,9 +140,9 @@ class BankServiceInterestTest {
     void depositJustBeforeAClaimEarnsOnlyOnTheOldMinimum() {
         Player steve = player("Steve", 1_000_000.0);
 
-        assertTrue(service.deposit(steve, 9_000_000.0).success());
-        assertTrue(service.claimInterest(steve, true).success());
-        assertTrue(service.withdraw(steve, 9_000_000.0).success());
+        assertTrue(run(service.deposit(steve, 9_000_000.0)).success());
+        assertTrue(run(service.claimInterest(steve, true)).success());
+        assertTrue(run(service.withdraw(steve, 9_000_000.0)).success());
 
         assertEquals(List.of(20_000.0), interestPaid);
         assertEquals(1_020_000.0, stored(steve).balance());
@@ -145,11 +151,11 @@ class BankServiceInterestTest {
     @Test
     void depositedMoneyEarnsFromTheClaimAfterItArrived() {
         Player steve = player("Steve", 1_000_000.0);
-        assertTrue(service.claimInterest(steve, true).success());
-        assertTrue(service.deposit(steve, 980_000.0).success());
+        assertTrue(run(service.claimInterest(steve, true)).success());
+        assertTrue(run(service.deposit(steve, 980_000.0)).success());
 
-        assertTrue(service.claimInterest(steve, true).success());
-        assertTrue(service.claimInterest(steve, true).success());
+        assertTrue(run(service.claimInterest(steve, true)).success());
+        assertTrue(run(service.claimInterest(steve, true)).success());
 
         assertEquals(List.of(20_000.0, 20_400.0, 40_408.0), interestPaid);
     }
@@ -163,7 +169,7 @@ class BankServiceInterestTest {
             double interest = Math.round(service.calculateInterest(expectedBalance, LEVEL) * 100.0) / 100.0;
             expected.add(interest);
             expectedBalance += interest;
-            assertTrue(service.claimInterest(steve, true).success());
+            assertTrue(run(service.claimInterest(steve, true)).success());
         }
         assertEquals(expected, interestPaid);
         assertEquals(Math.round(expectedBalance * 100.0) / 100.0, stored(steve).balance());
@@ -171,22 +177,22 @@ class BankServiceInterestTest {
         config.set("settings.pay-interest-to-bank", false);
         interestPaid.clear();
         Player alex = player("Alex", 1_000_000.0);
-        assertTrue(service.claimInterest(alex, true).success());
-        assertTrue(service.claimInterest(alex, true).success());
+        assertTrue(run(service.claimInterest(alex, true)).success());
+        assertTrue(run(service.claimInterest(alex, true)).success());
         assertEquals(List.of(20_000.0, 20_000.0), interestPaid);
     }
 
     @Test
     void moneyArrivingInAnEmptyAccountStartsAPeriodInsteadOfEarningAtOnce() {
         Player steve = player("Steve", 0.0);
-        assertTrue(service.deposit(steve, 1_000_000.0).success());
+        assertTrue(run(service.deposit(steve, 1_000_000.0)).success());
 
-        OperationResult first = service.claimInterest(steve, true);
+        OperationResult first = run(service.claimInterest(steve, true));
         assertEquals("interest.period-started", first.key());
         assertTrue(stored(steve).lastInterestClaim() > 0, "the claim used up the cooldown");
         assertEquals(1_000_000.0, stored(steve).minBalanceSinceClaim());
 
-        assertTrue(service.claimInterest(steve, true).success());
+        assertTrue(run(service.claimInterest(steve, true)).success());
         assertEquals(List.of(20_000.0), interestPaid);
     }
 
@@ -194,7 +200,7 @@ class BankServiceInterestTest {
     void anEmptyBankStillKeepsItsCooldown() {
         Player steve = player("Steve", 0.0);
 
-        assertEquals("interest.nothing-earned", service.claimInterest(steve, true).key());
+        assertEquals("interest.nothing-earned", run(service.claimInterest(steve, true)).key());
         assertEquals(0L, stored(steve).lastInterestClaim());
     }
 
@@ -202,12 +208,12 @@ class BankServiceInterestTest {
     void withdrawalsLowerTheMinimumAndDepositsDoNotRaiseIt() {
         Player steve = player("Steve", 1_000_000.0);
 
-        assertTrue(service.withdraw(steve, 600_000.0).success());
-        assertTrue(service.deposit(steve, 600_000.0).success());
+        assertTrue(run(service.withdraw(steve, 600_000.0)).success());
+        assertTrue(run(service.deposit(steve, 600_000.0)).success());
 
         assertEquals(1_000_000.0, stored(steve).balance());
         assertEquals(400_000.0, stored(steve).minBalanceSinceClaim());
-        assertTrue(service.claimInterest(steve, true).success());
+        assertTrue(run(service.claimInterest(steve, true)).success());
         assertEquals(List.of(8_000.0), interestPaid);
         assertEquals(1_008_000.0, stored(steve).minBalanceSinceClaim(), "a claim resets it to the balance after the claim");
     }
@@ -229,7 +235,7 @@ class BankServiceInterestTest {
     @Test
     void profileSwitchesResetTheMinimumAlongsideTheCooldown() {
         Player steve = player("Steve", 1_000_000.0);
-        assertTrue(service.withdraw(steve, 1_000_000.0).success());
+        assertTrue(run(service.withdraw(steve, 1_000_000.0)).success());
         assertEquals(0.0, stored(steve).minBalanceSinceClaim());
         bukkit.when(() -> Bukkit.getOfflinePlayer(steve.getUniqueId())).thenReturn(steve);
 
@@ -245,8 +251,11 @@ class BankServiceInterestTest {
     @Test
     void theInfoLinesShowWhatTheNextClaimPays() {
         Player steve = player("Steve", 1_000_000.0);
-        assertTrue(service.withdraw(steve, 500_000.0).success());
-        assertTrue(service.deposit(steve, 500_000.0).success());
+        assertTrue(run(service.withdraw(steve, 500_000.0)).success());
+        assertTrue(run(service.deposit(steve, 500_000.0)).success());
+        // the lines are drawn from the cache, which the login fills
+        when(steve.isOnline()).thenReturn(true);
+        run(service.loadAccount(steve));
 
         assertTrue(service.describeBalance(steve).stream().anyMatch(line -> line.contains("$10,000")),
                 String.valueOf(service.describeBalance(steve)));

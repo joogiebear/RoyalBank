@@ -42,6 +42,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 // Effects dispatched here: open_menu, deposit, withdraw, upgrade, confirm_upgrade, claim_interest,
 // close_inventory, play_sound.
@@ -93,6 +94,20 @@ public final class BankGui implements Listener {
             plugin.getLogger().warning("Bank menu '" + menuId + "' is not loaded.");
             return;
         }
+        if (!menuId.equals(MenuManager.TRANSACTIONS) || template.contentSlots().isEmpty()) {
+            open(player, menuId, template, List.of());
+            return;
+        }
+        // the history is read on the database thread; the menu opens once it is back
+        bankService.getRecentTransactions(player.getUniqueId(), template.contentSlots().size())
+                .thenAccept(transactions -> {
+                    if (player.isOnline()) {
+                        open(player, menuId, template, transactions);
+                    }
+                });
+    }
+
+    private void open(Player player, String menuId, MenuTemplate template, List<BankTransaction> transactions) {
         Inventory inventory = Bukkit.createInventory(new BankHolder(menuId), template.size(), Text.color(template.title()));
         template.applyFiller(inventory);
 
@@ -104,7 +119,7 @@ public final class BankGui implements Listener {
         }
 
         if (menuId.equals(MenuManager.TRANSACTIONS)) {
-            fillTransactions(player, inventory, template);
+            fillTransactions(inventory, template, transactions);
         } else if (menuId.equals(MenuManager.CONFIRM_UPGRADE)) {
             fillUpgradeCosts(player, inventory, template);
         }
@@ -120,12 +135,11 @@ public final class BankGui implements Listener {
         return spec.build(eco, placeholders, expandLore(player, lore));
     }
 
-    private void fillTransactions(Player player, Inventory inventory, MenuTemplate template) {
+    private void fillTransactions(Inventory inventory, MenuTemplate template, List<BankTransaction> transactions) {
         List<Integer> slots = template.contentSlots();
         if (slots.isEmpty()) {
             return;
         }
-        List<BankTransaction> transactions = bankService.getRecentTransactions(player, slots.size());
         ConfigurationSection entry = template.config().getConfigurationSection("entry");
         DateTimeFormatter timeFormat = DateTimeFormatter.ofPattern(entry.getString("time-format"))
                 .withZone(ZoneId.systemDefault());
@@ -329,7 +343,7 @@ public final class BankGui implements Listener {
             openMain(player);
             return;
         }
-        OperationResult result = kind == PendingAmount.Kind.DEPOSIT
+        CompletableFuture<OperationResult> result = kind == PendingAmount.Kind.DEPOSIT
                 ? bankService.deposit(player, parsed)
                 : bankService.withdraw(player, parsed);
         runAndRefresh(player, MenuManager.MAIN, result);
@@ -350,10 +364,17 @@ public final class BankGui implements Listener {
         return false;
     }
 
-    private void runAndRefresh(Player player, String menuId, OperationResult result) {
-        messages.sendResult(player, result);
-        playSound(menus.get(menuId), player, result.success() ? "sounds.success" : "sounds.fail");
-        Bukkit.getScheduler().runTask(plugin, () -> openMain(player));
+    private void runAndRefresh(Player player, String menuId, CompletableFuture<OperationResult> pending) {
+        pending.thenAccept(result -> {
+            messages.sendResult(player, result);
+            playSound(menus.get(menuId), player, result.success() ? "sounds.success" : "sounds.fail");
+            // next tick: a result that needed no database work arrives inside the click itself
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                if (player.isOnline()) {
+                    openMain(player);
+                }
+            });
+        });
     }
 
     // a %upgrade_info% line becomes one line per upgrade-description line

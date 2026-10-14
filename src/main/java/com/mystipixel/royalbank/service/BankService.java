@@ -19,13 +19,17 @@ import com.mystipixel.royalbank.message.MessageManager;
 import com.mystipixel.royalbank.security.AbuseMonitor;
 import com.mystipixel.royalbank.util.Amounts;
 import com.mystipixel.royalbank.util.Text;
+import com.mystipixel.royalcommon.storage.BusyGuard;
+import com.mystipixel.royalcommon.storage.DbExecutor;
 import net.milkbowl.vault.economy.EconomyResponse;
 import org.bukkit.Bukkit;
 import org.bukkit.NamespacedKey;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.ItemStack;
@@ -36,16 +40,36 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Supplier;
 import java.util.logging.Level;
 
+/**
+ * Every bank action runs its database transaction on the plugin's database thread and its Vault, cache, chat
+ * and audit steps on the main thread. Actions return a future completed on the main thread. Money always
+ * leaves its old home before it reaches the new one, and the first step is reversed when the second fails.
+ */
 public final class BankService implements Listener, RoyalBankAPI {
     private static final long DEFAULT_INTEREST_COOLDOWN_HOURS = 31L;
+    // how long a login waits for its account before joining without it (it is then loaded after the join)
+    private static final long LOGIN_LOAD_TIMEOUT_SECONDS = 10L;
+    // a login that never turned into a join (kicked, banned) leaves its preloaded row this long at most
+    private static final long PRELOAD_KEEP_NANOS = TimeUnit.MINUTES.toNanos(1);
 
     private final JavaPlugin plugin;
     private final BankDatabase database;
@@ -53,18 +77,27 @@ public final class BankService implements Listener, RoyalBankAPI {
     private final VaultHook vaultHook;
     private final AbuseMonitor abuseMonitor;
     private final MessageManager messages;
+    private final DbExecutor db;
     private AuditSink auditSink;
 
     // online players only, for display; every change writes the DB first, then refreshes this from the committed row
     private final AccountCache cache = new AccountCache();
+    // one action at a time per player (the purse for shared accounts)
+    private final BusyGuard<UUID> busy = new BusyGuard<>();
+    private final Map<UUID, Preloaded> preloaded = new ConcurrentHashMap<>();
+    private volatile boolean closed;
+
+    private record Preloaded(BankAccount account, long loadedAt) {
+    }
 
     public BankService(JavaPlugin plugin, BankDatabase database, LevelManager levelManager, VaultHook vaultHook,
-                       MessageManager messages) {
+                       MessageManager messages, DbExecutor db) {
         this.plugin = plugin;
         this.database = database;
         this.levelManager = levelManager;
         this.vaultHook = vaultHook;
         this.messages = messages;
+        this.db = db;
         this.abuseMonitor = new AbuseMonitor(plugin, messages);
         this.auditSink = new LocalAuditSink(abuseMonitor);
     }
@@ -86,14 +119,112 @@ public final class BankService implements Listener, RoyalBankAPI {
         return !(auditSink instanceof LocalAuditSink);
     }
 
+    /** Refuses new actions (they get the busy message); what is already running finishes. For onDisable. */
+    public void close() {
+        closed = true;
+    }
+
+    // work runs on the database thread; stages chained on the result run on the main thread
+    private <T> CompletableFuture<T> onDb(String label, Callable<T> work) {
+        return db.submit(label, work).whenCompleteAsync((result, failure) -> { }, db.mainThread());
+    }
+
+    // for the synchronous API: waits for the database thread, then the chained stages run on the caller's thread
+    private <T> CompletableFuture<T> onDbBlocking(String label, Callable<T> work) {
+        if (db.isDbThread()) {
+            try {
+                return CompletableFuture.completedFuture(work.call());
+            } catch (Exception e) {
+                return CompletableFuture.failedFuture(e);
+            }
+        }
+        try {
+            return CompletableFuture.completedFuture(db.submit(label, work).join());
+        } catch (CompletionException | CancellationException e) {
+            return CompletableFuture.failedFuture(e.getCause() != null ? e.getCause() : e);
+        }
+    }
+
+    private <T> CompletableFuture<T> onDb(boolean blocking, String label, Callable<T> work) {
+        return blocking ? onDbBlocking(label, work) : onDb(label, work);
+    }
+
+    // a transaction whose failure (already logged) counts as "not saved", so the caller reverses its first step
+    private <R> CompletableFuture<Optional<BankDatabase.Change<R>>> save(boolean blocking, String label,
+                                                                         Callable<Optional<BankDatabase.Change<R>>> work) {
+        return onDb(blocking, label, work).handle((saved, failure) -> failure == null ? saved : Optional.empty());
+    }
+
+    private static <T> CompletableFuture<T> done(T value) {
+        return CompletableFuture.completedFuture(value);
+    }
+
+    private CompletableFuture<OperationResult> guarded(UUID key, String action, Supplier<CompletableFuture<OperationResult>> work) {
+        if (closed || !busy.tryEnter(key)) {
+            return done(OperationResult.fail("general.busy"));
+        }
+        CompletableFuture<OperationResult> running;
+        try {
+            running = work.get();
+        } catch (RuntimeException e) {
+            busy.exit(key);
+            throw e;
+        }
+        return running.whenComplete((result, failure) -> {
+            busy.exit(key);
+            if (failure != null) {
+                plugin.getLogger().log(Level.SEVERE, "Bank " + action + " for " + key + " did not finish", failure);
+            }
+        });
+    }
+
+    // the synchronous API's answer when the action itself broke; the cause is already logged
+    private static OperationResult resultOf(CompletableFuture<OperationResult> future, String key) {
+        return future.handle((result, failure) -> failure == null ? result : OperationResult.fail(key)).join();
+    }
+
+    // login thread: the account is read before the player joins, so the join itself does no database work
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onPreLogin(AsyncPlayerPreLoginEvent event) {
+        if (closed || event.getLoginResult() != AsyncPlayerPreLoginEvent.Result.ALLOWED) {
+            return;
+        }
+        BankDatabase.NewAccount key = new BankDatabase.NewAccount(event.getUniqueId(), event.getName(),
+                levelManager.getStartingLevel(), true);
+        try {
+            BankAccount account = db.submit("load bank account at login " + key.uuid(), () -> database.getOrCreateAccount(key))
+                    .get(LOGIN_LOAD_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            preloaded.put(key.uuid(), new Preloaded(account, System.nanoTime()));
+        } catch (TimeoutException | ExecutionException e) {
+            plugin.getLogger().warning("Could not load the bank account of " + key.username()
+                    + " during login; it is loaded after the join instead.");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
-        loadAccount(event.getPlayer());
-        if (plugin.getConfig().getBoolean("settings.interest-on-join", true)) {
-            // only a payout is announced at join (silent interest reads as a bug), delayed past join messages
-            OperationResult interest = claimInterest(event.getPlayer(), false);
+        Player player = event.getPlayer();
+        Preloaded loaded = preloaded.remove(player.getUniqueId());
+        long now = System.nanoTime();
+        preloaded.values().removeIf(entry -> now - entry.loadedAt() > PRELOAD_KEEP_NANOS);
+        if (loaded != null) {
+            cache.put(loaded.account());
+            afterJoinLoad(player);
+        } else {
+            loadAccount(player).whenComplete((account, failure) -> afterJoinLoad(player));
+        }
+        notifyPendingFlags(player);
+    }
+
+    private void afterJoinLoad(Player player) {
+        if (!player.isOnline() || !plugin.getConfig().getBoolean("settings.interest-on-join", true)) {
+            return;
+        }
+        // only a payout is announced at join (silent interest reads as a bug), delayed past join messages
+        claimInterest(player, false).thenAccept(interest -> {
             if (interest.success() && interest.key() != null) {
-                Player player = event.getPlayer();
                 Bukkit.getScheduler().runTaskLater(plugin, () -> {
                     if (player.isOnline()) {
                         player.sendMessage(Text.color(
@@ -102,8 +233,7 @@ public final class BankService implements Listener, RoyalBankAPI {
                     }
                 }, 40L);
             }
-        }
-        notifyPendingFlags(event.getPlayer());
+        });
     }
 
     @EventHandler
@@ -125,38 +255,50 @@ public final class BankService implements Listener, RoyalBankAPI {
         });
     }
 
-    public void loadAccount(Player player) {
-        cache.put(database.getOrCreateAccount(player, levelManager.getStartingLevel()));
+    /** Reads (or creates) the player's row on the database thread and caches it on the main thread if they are still online. */
+    public CompletableFuture<BankAccount> loadAccount(Player player) {
+        BankDatabase.NewAccount key = personal(player);
+        // online check stops a load racing a quit from resurrecting an evicted entry
+        return onDb("load bank account " + key.uuid(), () -> database.getOrCreateAccount(key))
+                .thenApply(row -> player.isOnline() ? cache.put(row) : row);
     }
 
     public void unloadAccount(UUID uuid) {
         cache.remove(uuid);
+        preloaded.remove(uuid);
     }
 
-    // for display only: money decisions re-read the locked row inside their transaction
-    public BankAccount getAccount(Player player) {
-        Optional<BankAccount> cached = cache.get(player.getUniqueId());
-        if (cached.isPresent()) {
-            return cached.get();
+    /** Runs then on the main thread once the player's account is cached; loads it first when it is not. */
+    public void ensureLoaded(Player player, Runnable then) {
+        if (cache.get(player.getUniqueId()).isPresent()) {
+            then.run();
+            return;
         }
-        BankAccount loaded = database.getOrCreateAccount(player, levelManager.getStartingLevel());
-        // online check stops a load racing a quit from resurrecting an evicted entry
-        return player.isOnline() ? cache.put(loaded) : loaded;
+        loadAccount(player).whenComplete((account, failure) -> {
+            if (player.isOnline()) {
+                then.run();
+            }
+        });
+    }
+
+    // the cached row, for display; money decisions re-read the locked row inside their transaction
+    private CompletableFuture<BankAccount> accountFor(Player player) {
+        Optional<BankAccount> cached = cache.get(player.getUniqueId());
+        return cached.isPresent() ? done(cached.get()) : loadAccount(player);
+    }
+
+    /**
+     * For display only, never reads the database: the cached row, or an empty starting account while it is
+     * still loading.
+     */
+    public BankAccount getAccount(Player player) {
+        return cache.get(player.getUniqueId()).orElseGet(() -> new BankAccount(player.getUniqueId(),
+                player.getName(), 0.0, levelManager.getStartingLevel(), 0L, false));
     }
 
     /** Cache only, no database fallback. Safe from any thread. */
     public Optional<BankAccount> getCachedAccount(UUID uuid) {
         return cache.get(uuid);
-    }
-
-    // the stored row, for the checks made before money moves through Vault; also refreshes the cache
-    private BankAccount freshAccount(Player player) {
-        BankAccount account = database.getAccount(player.getUniqueId())
-                .orElseGet(() -> database.getOrCreateAccount(player, levelManager.getStartingLevel()));
-        if (player.isOnline()) {
-            cache.put(account);
-        }
-        return account;
     }
 
     private void cacheIfOnline(BankAccount account) {
@@ -190,6 +332,13 @@ public final class BankService implements Listener, RoyalBankAPI {
         }
     }
 
+    // a withdrawal saved before its purse payment: what putting it back needs
+    private record Taken(OperationResult result, double before, double after, double minBefore, long claimBefore) {
+        static Taken rejected(String key) {
+            return new Taken(OperationResult.fail(key), 0.0, 0.0, 0.0, 0L);
+        }
+    }
+
     private boolean compensateDeposit(Player player, double amount, String operation) {
         EconomyResponse response = vaultHook.getEconomy().depositPlayer(player, amount);
         if (!response.transactionSuccess()) {
@@ -200,28 +349,39 @@ public final class BankService implements Listener, RoyalBankAPI {
         return true;
     }
 
-    private boolean compensateWithdraw(Player player, double amount, String operation) {
-        EconomyResponse response = vaultHook.getEconomy().withdrawPlayer(player, amount);
-        if (!response.transactionSuccess()) {
-            plugin.getLogger().severe("RoyalBank: FAILED to reclaim " + money(amount) + " from " + player.getName()
-                    + " (" + player.getUniqueId() + ") after a failed " + operation + " save. MANUAL RECONCILIATION NEEDED. Vault: " + response.errorMessage);
-            return false;
+    // money taken from the bank that could not reach the purse goes back, and so does the interest minimum it lowered
+    private BankDatabase.Change<Boolean> returnToBank(BankAccount current, double amount, double minBefore, long claimBefore,
+                                                      String type, String note) {
+        double newBalance = round(current.balance() + amount);
+        BankAccount restored = current.withBalance(newBalance);
+        if (current.lastInterestClaim() == claimBefore) {
+            restored = restored.withMinBalanceSinceClaim(Math.min(minBefore, current.minBalanceSinceClaim() + amount));
         }
-        return true;
+        return BankDatabase.Change.write(restored, List.of(ledger(current, type, amount, newBalance, note)), Boolean.TRUE);
     }
 
-    public OperationResult deposit(Player player, double amount) {
-        amount = Amounts.sanitize(plugin, amount);
-        double minimum = plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01);
-        if (amount < minimum) {
-            return OperationResult.fail("amount.too-small", "minimum", money(minimum));
-        }
+    private void logLostPayout(Player player, double amount, String operation) {
+        plugin.getLogger().severe("RoyalBank: FAILED to put back " + money(amount) + " for " + player.getName()
+                + " (" + player.getUniqueId() + ") after the purse payment of a " + operation
+                + " failed. MANUAL RECONCILIATION NEEDED.");
+    }
 
-        BankAccount account = freshAccount(player);
+    public CompletableFuture<OperationResult> deposit(Player player, double amount) {
+        return guarded(player.getUniqueId(), "deposit", () -> {
+            double sanitized = Amounts.sanitize(plugin, amount);
+            double minimum = plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01);
+            if (sanitized < minimum) {
+                return done(OperationResult.fail("amount.too-small", "minimum", money(minimum)));
+            }
+            return accountFor(player).thenCompose(account -> depositFrom(player, account, sanitized));
+        });
+    }
+
+    private CompletableFuture<OperationResult> depositFrom(Player player, BankAccount account, double amount) {
         BankLevel level = getEffectiveLevel(account.level());
         double availableSpace = level.maxBalance() - account.balance();
         if (availableSpace <= 0) {
-            return OperationResult.fail("deposit.bank-full");
+            return done(OperationResult.fail("deposit.bank-full"));
         }
 
         // both the bank credit and the wallet debit come from the rounded post-deposit balance, so they
@@ -229,19 +389,20 @@ public final class BankService implements Listener, RoyalBankAPI {
         double principalBalance = round(Math.min(account.balance() + Math.min(amount, availableSpace), level.maxBalance()));
         double charge = round(principalBalance - account.balance());
         if (charge <= 0.0) {
-            return OperationResult.fail("deposit.bank-full");
+            return done(OperationResult.fail("deposit.bank-full"));
         }
 
         if (!vaultHook.getEconomy().has(player, charge)) {
-            return OperationResult.fail("deposit.not-enough-money");
+            return done(OperationResult.fail("deposit.not-enough-money"));
         }
 
         EconomyResponse response = vaultHook.getEconomy().withdrawPlayer(player, charge);
         if (!response.transactionSuccess()) {
-            return OperationResult.fail("deposit.failed", "reason", String.valueOf(response.errorMessage));
+            return done(OperationResult.fail("deposit.failed", "reason", String.valueOf(response.errorMessage)));
         }
 
-        Optional<BankDatabase.Change<Outcome>> saved = database.change(personal(player), current -> {
+        BankDatabase.NewAccount key = personal(player);
+        return this.<Outcome>save(false, "deposit for " + key.username(), () -> database.change(key, current -> {
             BankLevel currentLevel = getEffectiveLevel(current.level());
             double principal = round(current.balance() + charge);
             if (principal > currentLevel.maxBalance()) {
@@ -262,145 +423,165 @@ public final class BankService implements Listener, RoyalBankAPI {
                     ? OperationResult.success("deposit.success-bonus", "amount", money(charge), "bonus", money(paidBonus))
                     : OperationResult.success("deposit.success", "amount", money(charge));
             return BankDatabase.Change.write(updated, rows, new Outcome(result, current.balance(), principal, paidBonus));
-        });
-        if (saved.isEmpty() || !saved.get().written()) {
-            boolean refunded = compensateDeposit(player, charge, "deposit");
-            if (!refunded) {
-                return OperationResult.fail("deposit.needs-staff");
+        })).thenApply(saved -> {
+            if (saved.isEmpty() || !saved.get().written()) {
+                boolean refunded = compensateDeposit(player, charge, "deposit");
+                if (!refunded) {
+                    return OperationResult.fail("deposit.needs-staff");
+                }
+                return saved.isEmpty() ? OperationResult.fail("deposit.refunded") : saved.get().result().result();
             }
-            return saved.isEmpty() ? OperationResult.fail("deposit.refunded") : saved.get().result().result();
-        }
-        Outcome outcome = saved.get().result();
-        cacheIfOnline(saved.get().account());
-        // principal and bonus as separate audit events, so each balance-after stays consistent.
-        // The principal is the player's own purse money, not new wealth, so it is not incoming.
-        report(player.getUniqueId(), player.getName(), "deposited", charge, outcome.before(), outcome.after(), false, null, null);
-        if (outcome.extra() > 0.0) {
-            report(player.getUniqueId(), player.getName(), "bonus", outcome.extra(), outcome.after(),
-                    saved.get().account().balance(), true, null, null);
-        }
-        return outcome.result();
+            Outcome outcome = saved.get().result();
+            cacheIfOnline(saved.get().account());
+            // principal and bonus as separate audit events, so each balance-after stays consistent.
+            // The principal is the player's own purse money, not new wealth, so it is not incoming.
+            report(player.getUniqueId(), player.getName(), "deposited", charge, outcome.before(), outcome.after(), false, null, null);
+            if (outcome.extra() > 0.0) {
+                report(player.getUniqueId(), player.getName(), "bonus", outcome.extra(), outcome.after(),
+                        saved.get().account().balance(), true, null, null);
+            }
+            return outcome.result();
+        });
     }
 
-    public OperationResult withdraw(Player player, double amount) {
-        amount = Amounts.sanitize(plugin, amount);
+    public CompletableFuture<OperationResult> withdraw(Player player, double amount) {
+        return guarded(player.getUniqueId(), "withdrawal", () -> withdrawFlow(player, amount));
+    }
+
+    private CompletableFuture<OperationResult> withdrawFlow(Player player, double amount) {
+        double withdrawn = Amounts.sanitize(plugin, amount);
         double minimum = plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01);
-        if (amount < minimum) {
-            return OperationResult.fail("amount.too-small", "minimum", money(minimum));
+        if (withdrawn < minimum) {
+            return done(OperationResult.fail("amount.too-small", "minimum", money(minimum)));
         }
 
-        if (freshAccount(player).balance() < amount) {
-            return OperationResult.fail("withdraw.not-enough-money");
-        }
-
-        EconomyResponse response = vaultHook.getEconomy().depositPlayer(player, amount);
-        if (!response.transactionSuccess()) {
-            return OperationResult.fail("withdraw.failed", "reason", String.valueOf(response.errorMessage));
-        }
-
-        double withdrawn = amount;
-        Optional<BankDatabase.Change<Outcome>> saved = database.change(personal(player), current -> {
+        BankDatabase.NewAccount key = personal(player);
+        return this.<Taken>save(false, "withdrawal for " + key.username(), () -> database.change(key, current -> {
             if (current.balance() < withdrawn) {
-                return BankDatabase.Change.none(Outcome.rejected("withdraw.not-enough-money"));
+                return BankDatabase.Change.none(Taken.rejected("withdraw.not-enough-money"));
             }
             double newBalance = round(current.balance() - withdrawn);
             return BankDatabase.Change.write(current.withBalance(newBalance),
                     List.of(ledger(current, "WITHDRAW", withdrawn, newBalance, messages.get("notes.withdraw"))),
-                    new Outcome(OperationResult.success("withdraw.success", "amount", money(withdrawn)), current.balance(), newBalance, 0.0));
-        });
-        if (saved.isEmpty() || !saved.get().written()) {
-            // take back the cash just handed out, or the money is duplicated
-            boolean clawedBack = compensateWithdraw(player, amount, "withdrawal");
-            if (!clawedBack) {
-                return OperationResult.fail("withdraw.needs-staff");
+                    new Taken(OperationResult.success("withdraw.success", "amount", money(withdrawn)), current.balance(), newBalance,
+                            current.minBalanceSinceClaim(), current.lastInterestClaim()));
+        })).thenCompose(saved -> {
+            if (saved.isEmpty()) {
+                return done(OperationResult.fail("withdraw.reverted"));
             }
-            return saved.isEmpty() ? OperationResult.fail("withdraw.reverted") : saved.get().result().result();
-        }
-        Outcome outcome = saved.get().result();
-        cacheIfOnline(saved.get().account());
-        report(player.getUniqueId(), player.getName(), "withdrew", amount, outcome.before(), outcome.after(), false, null, null);
-        return outcome.result();
+            if (!saved.get().written()) {
+                return done(saved.get().result().result());
+            }
+            Taken taken = saved.get().result();
+            cacheIfOnline(saved.get().account());
+            EconomyResponse response = vaultHook.getEconomy().depositPlayer(player, withdrawn);
+            if (response.transactionSuccess()) {
+                report(player.getUniqueId(), player.getName(), "withdrew", withdrawn, taken.before(), taken.after(), false, null, null);
+                return done(taken.result());
+            }
+            OperationResult failed = OperationResult.fail("withdraw.failed", "reason", String.valueOf(response.errorMessage));
+            return this.<Boolean>save(false, "put back withdrawal for " + key.username(), () -> database.change(key, current ->
+                    returnToBank(current, withdrawn, taken.minBefore(), taken.claimBefore(), "WITHDRAW_REVERTED",
+                            messages.get("notes.withdraw-reverted")))).thenApply(back -> {
+                if (back.isPresent() && back.get().written()) {
+                    cacheIfOnline(back.get().account());
+                    return failed;
+                }
+                logLostPayout(player, withdrawn, "withdrawal");
+                return OperationResult.fail("withdraw.needs-staff");
+            });
+        });
     }
 
     /** Bank to bank, no Vault. Rejected outright if the full amount won't fit under the recipient's cap. */
-    public OperationResult transfer(Player sender, OfflinePlayer recipient, double amount) {
+    public CompletableFuture<OperationResult> transfer(Player sender, OfflinePlayer recipient, double amount) {
+        return guarded(sender.getUniqueId(), "transfer", () -> transferFlow(sender, recipient, amount));
+    }
+
+    private CompletableFuture<OperationResult> transferFlow(Player sender, OfflinePlayer recipient, double amount) {
         if (recipient.getUniqueId().equals(sender.getUniqueId())) {
-            return OperationResult.fail("transfer.self");
+            return done(OperationResult.fail("transfer.self"));
         }
         // same playtime gate as RoyalTrade, or alt-account RMT just moves from trades to bank transfers
         double minHours = plugin.getConfig().getDouble("settings.transfer.min-playtime-hours", 0.0);
         if (minHours > 0) {
             String required = String.format(Locale.US, "%.0f", minHours);
             if (playtimeHours(sender) < minHours) {
-                return OperationResult.fail("transfer.sender-playtime", "hours", required);
+                return done(OperationResult.fail("transfer.sender-playtime", "hours", required));
             }
             if (playtimeHours(recipient) < minHours) {
                 String name = recipient.getName() != null ? recipient.getName() : messages.get("transfer.unknown-recipient");
-                return OperationResult.fail("transfer.recipient-playtime", "player", name, "hours", required);
+                return done(OperationResult.fail("transfer.recipient-playtime", "player", name, "hours", required));
             }
         }
         double sent = Amounts.sanitize(plugin, amount);
         double minimum = plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01);
         if (sent < minimum) {
-            return OperationResult.fail("amount.too-small", "minimum", money(minimum));
+            return done(OperationResult.fail("amount.too-small", "minimum", money(minimum)));
         }
 
         String senderName = sender.getName();
-        Optional<BankDatabase.Change<Outcome>> saved = database.transfer(personal(sender), personal(recipient), (from, to) -> {
-            if (from.balance() < sent) {
+        UUID senderId = sender.getUniqueId();
+        UUID recipientId = recipient.getUniqueId();
+        BankDatabase.NewAccount from = personal(sender);
+        BankDatabase.NewAccount to = personal(recipient);
+        return this.<Outcome>save(false, "transfer " + from.uuid() + " -> " + to.uuid(), () -> database.transfer(from, to, (payer, payee) -> {
+            if (payer.balance() < sent) {
                 return BankDatabase.Change.none(Outcome.rejected("transfer.not-enough-money"));
             }
-            BankLevel recipientLevel = getEffectiveLevel(to.level());
-            double recipientSpace = round(recipientLevel.maxBalance() - to.balance());
+            BankLevel recipientLevel = getEffectiveLevel(payee.level());
+            double recipientSpace = round(recipientLevel.maxBalance() - payee.balance());
             if (sent > recipientSpace) {
-                return BankDatabase.Change.none(Outcome.rejected("transfer.recipient-full", "player", to.username(),
+                return BankDatabase.Change.none(Outcome.rejected("transfer.recipient-full", "player", payee.username(),
                         "space", money(Math.max(0.0, recipientSpace))));
             }
-            double senderNew = round(from.balance() - sent);
-            double recipientNew = round(to.balance() + sent);
+            double senderNew = round(payer.balance() - sent);
+            double recipientNew = round(payee.balance() + sent);
             List<BankDatabase.Ledger> rows = List.of(
-                    ledger(from, "TRANSFER_OUT", sent, senderNew, messages.get("notes.transfer-out", "player", to.username())),
-                    ledger(to, "TRANSFER_IN", sent, recipientNew, messages.get("notes.transfer-in", "player", senderName)));
-            return new BankDatabase.Change<>(List.of(from.withBalance(senderNew), to.withBalance(recipientNew)), rows, List.of(),
-                    new Outcome(OperationResult.success("transfer.success", "amount", money(sent), "player", to.username()),
-                            from.balance(), to.balance(), 0.0));
-        });
-        if (saved.isEmpty()) {
-            return OperationResult.fail("transfer.not-saved");
-        }
-        BankDatabase.Change<Outcome> change = saved.get();
-        if (!change.written()) {
+                    ledger(payer, "TRANSFER_OUT", sent, senderNew, messages.get("notes.transfer-out", "player", payee.username())),
+                    ledger(payee, "TRANSFER_IN", sent, recipientNew, messages.get("notes.transfer-in", "player", senderName)));
+            return new BankDatabase.Change<>(List.of(payer.withBalance(senderNew), payee.withBalance(recipientNew)), rows, List.of(),
+                    new Outcome(OperationResult.success("transfer.success", "amount", money(sent), "player", payee.username()),
+                            payer.balance(), payee.balance(), 0.0));
+        })).thenApply(saved -> {
+            if (saved.isEmpty()) {
+                return OperationResult.fail("transfer.not-saved");
+            }
+            BankDatabase.Change<Outcome> change = saved.get();
+            if (!change.written()) {
+                return change.result().result();
+            }
+            BankAccount senderUpdated = change.accounts().get(0);
+            BankAccount recipientUpdated = change.accounts().get(1);
+            cacheIfOnline(senderUpdated);
+            cacheIfOnline(recipientUpdated);
+
+            // both ends carry the counterparty so EconGuard can link the two players
+            String recipientName = recipientUpdated.username();
+            report(senderId, senderName, "transfer-sent", sent,
+                    change.result().before(), senderUpdated.balance(), false, recipientId, recipientName);
+            report(recipientId, recipientName, "transfer-received", sent,
+                    change.result().after(), recipientUpdated.balance(), true, senderId, senderName);
             return change.result().result();
-        }
-        BankAccount senderUpdated = change.accounts().get(0);
-        BankAccount recipientUpdated = change.accounts().get(1);
-        cacheIfOnline(senderUpdated);
-        cacheIfOnline(recipientUpdated);
-
-        // both ends carry the counterparty so EconGuard can link the two players
-        String recipientName = recipientUpdated.username();
-        report(sender.getUniqueId(), senderName, "transfer-sent", sent,
-                change.result().before(), senderUpdated.balance(), false, recipient.getUniqueId(), recipientName);
-        report(recipient.getUniqueId(), recipientName, "transfer-received", sent,
-                change.result().after(), recipientUpdated.balance(), true, sender.getUniqueId(), senderName);
-
-        return change.result().result();
+        });
     }
 
     @Override
     public BankSnapshot exportAccount(UUID playerId) {
-        return database.getAccount(playerId)
+        return onDbBlocking("export bank account " + playerId, () -> database.getAccount(playerId)).join()
                 .map(a -> new BankSnapshot(a.balance(), a.level(), a.lastInterestClaim(), a.bonusClaimed()))
                 .orElse(new BankSnapshot(0.0, levelManager.getStartingLevel(), 0L, false));
     }
 
     @Override
     public void importAccount(UUID playerId, BankSnapshot snapshot) {
-        String name = database.getAccount(playerId).map(BankAccount::username).orElse(nameOf(playerId));
+        String name = onDbBlocking("read bank account " + playerId, () -> database.getAccount(playerId)).join()
+                .map(BankAccount::username).orElse(nameOf(playerId));
         BankAccount updated = new BankAccount(playerId, name, round(snapshot.balance()),
                 snapshot.level(), snapshot.lastInterestClaim(), snapshot.bonusClaimed());
-        database.change(new BankDatabase.NewAccount(playerId, name, updated.level(), false),
-                        current -> BankDatabase.Change.write(updated, List.of(), Boolean.TRUE))
+        BankDatabase.NewAccount key = new BankDatabase.NewAccount(playerId, name, updated.level(), false);
+        onDbBlocking("import bank account " + playerId,
+                () -> database.change(key, current -> BankDatabase.Change.write(updated, List.of(), Boolean.TRUE))).join()
                 .ifPresent(saved -> cacheIfOnline(saved.account()));
     }
 
@@ -414,7 +595,7 @@ public final class BankService implements Listener, RoyalBankAPI {
         return name != null ? name : "Account";
     }
 
-    // a fresh unsaved account at the starting level if none exists
+    // a fresh unsaved account at the starting level if none exists; database thread
     private BankAccount loadAccountById(UUID accountId, String label) {
         return database.getAccount(accountId).orElseGet(() ->
                 new BankAccount(accountId, label == null ? "Account" : label, 0.0,
@@ -423,29 +604,44 @@ public final class BankService implements Listener, RoyalBankAPI {
 
     @Override
     public double getAccountBalance(UUID accountId) {
-        return round(database.getAccount(accountId).map(BankAccount::balance).orElse(0.0));
+        return round(onDbBlocking("read shared account " + accountId, () -> database.getAccount(accountId)).join()
+                .map(BankAccount::balance).orElse(0.0));
     }
 
     @Override
     public AccountView getAccountView(UUID accountId, String label) {
-        BankAccount account = loadAccountById(accountId, label);
+        BankAccount account = onDbBlocking("read shared account " + accountId, () -> loadAccountById(accountId, label)).join();
         BankLevel level = getEffectiveLevel(account.level());
         return new AccountView(round(account.balance()), account.level(), level.name(), level.maxBalance());
     }
 
     @Override
     public String accountDeposit(Player purse, UUID accountId, String label, double amount) {
-        return apiResult(depositToAccount(purse, accountId, label, amount));
+        return apiResult(resultOf(guarded(purse.getUniqueId(), "shared account deposit",
+                () -> depositToAccount(purse, accountId, label, amount, true)), "account.deposit.refunded"));
+    }
+
+    @Override
+    public CompletableFuture<String> accountDepositAsync(Player purse, UUID accountId, String label, double amount) {
+        return guarded(purse.getUniqueId(), "shared account deposit",
+                () -> depositToAccount(purse, accountId, label, amount, false)).thenApply(this::apiResult);
     }
 
     @Override
     public String accountWithdraw(Player purse, UUID accountId, String label, double amount) {
-        return apiResult(withdrawFromAccount(purse, accountId, label, amount));
+        return apiResult(resultOf(guarded(purse.getUniqueId(), "shared account withdrawal",
+                () -> withdrawFromAccount(purse, accountId, label, amount, true)), "withdraw.reverted"));
+    }
+
+    @Override
+    public CompletableFuture<String> accountWithdrawAsync(Player purse, UUID accountId, String label, double amount) {
+        return guarded(purse.getUniqueId(), "shared account withdrawal",
+                () -> withdrawFromAccount(purse, accountId, label, amount, false)).thenApply(this::apiResult);
     }
 
     @Override
     public UpgradeView getUpgradeView(UUID accountId, String label) {
-        BankAccount account = loadAccountById(accountId, label);
+        BankAccount account = onDbBlocking("read shared account " + accountId, () -> loadAccountById(accountId, label)).join();
         BankLevel next = levelManager.getNextLevel(account.level()).orElse(null);
         if (next == null) {
             return new UpgradeView(true, account.level(), "", 0.0, "", getEffectiveLevel(account.level()).maxBalance());
@@ -456,7 +652,14 @@ public final class BankService implements Listener, RoyalBankAPI {
 
     @Override
     public String accountUpgrade(Player purse, UUID accountId, String label) {
-        return apiResult(upgradeAccount(purse, accountId, label));
+        return apiResult(resultOf(guarded(purse.getUniqueId(), "shared account upgrade",
+                () -> upgradeAccount(purse, accountId, label, true)), "upgrade.refunded"));
+    }
+
+    @Override
+    public CompletableFuture<String> accountUpgradeAsync(Player purse, UUID accountId, String label) {
+        return guarded(purse.getUniqueId(), "shared account upgrade",
+                () -> upgradeAccount(purse, accountId, label, false)).thenApply(this::apiResult);
     }
 
     // the API contract: null on success, otherwise the rendered message without the prefix
@@ -464,86 +667,117 @@ public final class BankService implements Listener, RoyalBankAPI {
         return result.success() ? null : messages.render(result);
     }
 
-    private OperationResult depositToAccount(Player purse, UUID accountId, String label, double amount) {
-        amount = Amounts.sanitize(plugin, amount);
+    private CompletableFuture<OperationResult> depositToAccount(Player purse, UUID accountId, String label, double amount,
+                                                                boolean blocking) {
+        double requested = Amounts.sanitize(plugin, amount);
         double minimum = plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01);
-        if (amount < minimum) {
-            return OperationResult.fail("amount.too-small", "minimum", money(minimum));
+        if (requested < minimum) {
+            return done(OperationResult.fail("amount.too-small", "minimum", money(minimum)));
         }
-        BankAccount account = loadAccountById(accountId, label);
+        return onDb(blocking, "read shared account " + accountId, () -> loadAccountById(accountId, label))
+                .thenCompose(account -> depositToAccount(purse, accountId, label, account, requested, blocking));
+    }
+
+    private CompletableFuture<OperationResult> depositToAccount(Player purse, UUID accountId, String label, BankAccount account,
+                                                                double amount, boolean blocking) {
         BankLevel level = getEffectiveLevel(account.level());
         double space = level.maxBalance() - account.balance();
         if (space <= 0) {
-            return OperationResult.fail("account.deposit.bank-full");
+            return done(OperationResult.fail("account.deposit.bank-full"));
         }
         double principal = round(Math.min(account.balance() + Math.min(amount, space), level.maxBalance()));
         double charge = round(principal - account.balance());
         if (charge <= 0.0) {
-            return OperationResult.fail("account.deposit.bank-full");
+            return done(OperationResult.fail("account.deposit.bank-full"));
         }
         if (!vaultHook.getEconomy().has(purse, charge)) {
-            return OperationResult.fail("account.deposit.not-enough-money");
+            return done(OperationResult.fail("account.deposit.not-enough-money"));
         }
         EconomyResponse response = vaultHook.getEconomy().withdrawPlayer(purse, charge);
         if (!response.transactionSuccess()) {
-            return OperationResult.fail("deposit.failed", "reason", String.valueOf(response.errorMessage));
+            return done(OperationResult.fail("deposit.failed", "reason", String.valueOf(response.errorMessage)));
         }
-        Optional<BankDatabase.Change<Outcome>> saved = database.changeCoop(shared(accountId, label), (current, depositors, nextSeq) -> {
+        UUID purseId = purse.getUniqueId();
+        String purseName = purse.getName();
+        BankDatabase.NewAccount key = shared(accountId, label);
+        return this.<Outcome>save(blocking, "shared account deposit " + accountId, () -> database.changeCoop(key, (current, depositors, nextSeq) -> {
             double newBalance = round(current.balance() + charge);
             if (newBalance > getEffectiveLevel(current.level()).maxBalance()) {
                 return BankDatabase.Change.none(Outcome.rejected("account.deposit.bank-full"));
             }
-            CoopContribution contribution = new CoopContribution(accountId, purse.getUniqueId(), purse.getName(), charge, nextSeq);
+            CoopContribution contribution = new CoopContribution(accountId, purseId, purseName, charge, nextSeq);
             return new BankDatabase.Change<>(List.of(current.withBalance(newBalance)),
                     List.of(ledger(current, "COOP_DEPOSIT", charge, newBalance,
-                            messages.get("notes.account-deposit", "player", purse.getName()))),
+                            messages.get("notes.account-deposit", "player", purseName))),
                     List.of(contribution),
                     new Outcome(OperationResult.silent(), current.balance(), newBalance, 0.0));
+        })).thenApply(saved -> {
+            if (saved.isEmpty() || !saved.get().written()) {
+                compensateDeposit(purse, charge, "account deposit");
+                return saved.isEmpty() ? OperationResult.fail("account.deposit.refunded") : saved.get().result().result();
+            }
+            Outcome outcome = saved.get().result();
+            report(purseId, purseName, "coop-deposited", charge, outcome.before(), outcome.after(), false, null, null);
+            return outcome.result();
         });
-        if (saved.isEmpty() || !saved.get().written()) {
-            compensateDeposit(purse, charge, "account deposit");
-            return saved.isEmpty() ? OperationResult.fail("account.deposit.refunded") : saved.get().result().result();
+    }
+
+    private record CoopWithdrawal(OperationResult result, double before, List<CoopContributions.Share> shares,
+                                  double minBefore, long claimBefore) {
+        static CoopWithdrawal rejected(String key) {
+            return new CoopWithdrawal(OperationResult.fail(key), 0.0, List.of(), 0.0, 0L);
         }
-        Outcome outcome = saved.get().result();
-        report(purse.getUniqueId(), purse.getName(), "coop-deposited", charge, outcome.before(), outcome.after(), false, null, null);
-        return outcome.result();
     }
 
-    private record CoopWithdrawal(OperationResult result, double before, List<CoopContributions.Share> shares) {
-    }
-
-    private OperationResult withdrawFromAccount(Player purse, UUID accountId, String label, double amount) {
+    private CompletableFuture<OperationResult> withdrawFromAccount(Player purse, UUID accountId, String label, double amount,
+                                                                   boolean blocking) {
         double taken = Amounts.sanitize(plugin, amount);
         double minimum = plugin.getConfig().getDouble("settings.amount-limits.min-transaction", 0.01);
         if (taken < minimum) {
-            return OperationResult.fail("amount.too-small", "minimum", money(minimum));
+            return done(OperationResult.fail("amount.too-small", "minimum", money(minimum)));
         }
-        if (loadAccountById(accountId, label).balance() < taken) {
-            return OperationResult.fail("account.withdraw.not-enough-money");
-        }
-        EconomyResponse response = vaultHook.getEconomy().depositPlayer(purse, taken);
-        if (!response.transactionSuccess()) {
-            return OperationResult.fail("withdraw.failed", "reason", String.valueOf(response.errorMessage));
-        }
-        Optional<BankDatabase.Change<CoopWithdrawal>> saved = database.changeCoop(shared(accountId, label), (current, depositors, nextSeq) -> {
+        UUID purseId = purse.getUniqueId();
+        String purseName = purse.getName();
+        BankDatabase.NewAccount key = shared(accountId, label);
+        return this.<CoopWithdrawal>save(blocking, "shared account withdrawal " + accountId, () -> database.changeCoop(key, (current, depositors, nextSeq) -> {
             if (current.balance() < taken) {
-                return BankDatabase.Change.none(new CoopWithdrawal(OperationResult.fail("account.withdraw.not-enough-money"), 0.0, List.of()));
+                return BankDatabase.Change.none(CoopWithdrawal.rejected("account.withdraw.not-enough-money"));
             }
             double newBalance = round(current.balance() - taken);
-            List<CoopContributions.Share> shares = CoopContributions.shares(depositors, purse.getUniqueId(), taken);
+            List<CoopContributions.Share> shares = CoopContributions.shares(depositors, purseId, taken);
             return new BankDatabase.Change<>(List.of(current.withBalance(newBalance)),
                     List.of(ledger(current, "COOP_WITHDRAW", taken, newBalance,
-                            messages.get("notes.account-withdraw", "player", purse.getName()))),
+                            messages.get("notes.account-withdraw", "player", purseName))),
                     CoopContributions.withdrawalChanges(accountId, shares),
-                    new CoopWithdrawal(OperationResult.silent(), current.balance(), shares));
+                    new CoopWithdrawal(OperationResult.silent(), current.balance(), shares,
+                            current.minBalanceSinceClaim(), current.lastInterestClaim()));
+        })).thenCompose(saved -> {
+            if (saved.isEmpty()) {
+                return done(OperationResult.fail("withdraw.reverted"));
+            }
+            if (!saved.get().written()) {
+                return done(saved.get().result().result());
+            }
+            CoopWithdrawal withdrawal = saved.get().result();
+            EconomyResponse response = vaultHook.getEconomy().depositPlayer(purse, taken);
+            if (response.transactionSuccess()) {
+                reportCoopWithdrawal(purse, withdrawal.shares(), withdrawal.before());
+                return done(withdrawal.result());
+            }
+            OperationResult failed = OperationResult.fail("withdraw.failed", "reason", String.valueOf(response.errorMessage));
+            return this.<Boolean>save(blocking, "put back shared account withdrawal " + accountId, () -> database.changeCoop(key, (current, depositors, nextSeq) -> {
+                BankDatabase.Change<Boolean> back = returnToBank(current, taken, withdrawal.minBefore(), withdrawal.claimBefore(),
+                        "COOP_WITHDRAW_REVERTED", messages.get("notes.account-withdraw-reverted", "player", purseName));
+                return new BankDatabase.Change<>(back.accounts(), back.ledger(),
+                        CoopContributions.returnedChanges(accountId, withdrawal.shares()), Boolean.TRUE);
+            })).thenApply(back -> {
+                if (back.isPresent() && back.get().written()) {
+                    return failed;
+                }
+                logLostPayout(purse, taken, "shared account withdrawal");
+                return OperationResult.fail("withdraw.needs-staff");
+            });
         });
-        if (saved.isEmpty() || !saved.get().written()) {
-            compensateWithdraw(purse, taken, "account withdrawal");
-            return saved.isEmpty() ? OperationResult.fail("withdraw.reverted") : saved.get().result().result();
-        }
-        CoopWithdrawal withdrawal = saved.get().result();
-        reportCoopWithdrawal(purse, withdrawal.shares(), withdrawal.before());
-        return withdrawal.result();
     }
 
     // Money a member paid in and takes back is an internal move. Money another member paid in is
@@ -589,95 +823,156 @@ public final class BankService implements Listener, RoyalBankAPI {
                 Outcome.of(success));
     }
 
-    private OperationResult upgradeAccount(Player purse, UUID accountId, String label) {
-        BankAccount account = loadAccountById(accountId, label);
+    // takes back a saved upgrade whose items were gone by the time they were to be removed
+    private BankDatabase.Change<Boolean> undoLevelUp(BankAccount current, int paidFrom, BankLevel next, String type) {
+        if (current.level() != next.level()) {
+            return BankDatabase.Change.none(Boolean.FALSE);
+        }
+        return BankDatabase.Change.write(current.withLevel(paidFrom),
+                List.of(ledger(current, type, next.upgradeMoneyCost(), current.balance(),
+                        messages.get("notes.upgrade-reverted", "level_name", next.name()))),
+                Boolean.TRUE);
+    }
+
+    private boolean stillHasItems(Player player, List<ItemRequirement> requirements) {
+        return requirements.isEmpty() || (player.isOnline() && getMissingItems(player, requirements).isEmpty());
+    }
+
+    private CompletableFuture<OperationResult> upgradeAccount(Player purse, UUID accountId, String label, boolean blocking) {
+        return onDb(blocking, "read shared account " + accountId, () -> loadAccountById(accountId, label))
+                .thenCompose(account -> upgradeAccount(purse, accountId, label, account, blocking));
+    }
+
+    private CompletableFuture<OperationResult> upgradeAccount(Player purse, UUID accountId, String label, BankAccount account,
+                                                              boolean blocking) {
         BankLevel next = levelManager.getNextLevel(account.level()).orElse(null);
         if (next == null) {
-            return OperationResult.fail("account.upgrade.max-level");
+            return done(OperationResult.fail("account.upgrade.max-level"));
         }
         if (!vaultHook.getEconomy().has(purse, next.upgradeMoneyCost())) {
-            return OperationResult.fail("account.upgrade.not-enough-money", "cost", money(next.upgradeMoneyCost()));
+            return done(OperationResult.fail("account.upgrade.not-enough-money", "cost", money(next.upgradeMoneyCost())));
         }
         List<String> missing = getMissingItems(purse, next.itemRequirements());
         if (!missing.isEmpty()) {
-            return OperationResult.fail("upgrade.missing-items", "items", joinItems(missing));
+            return done(OperationResult.fail("upgrade.missing-items", "items", joinItems(missing)));
         }
         EconomyResponse response = vaultHook.getEconomy().withdrawPlayer(purse, next.upgradeMoneyCost());
         if (!response.transactionSuccess()) {
-            return OperationResult.fail("upgrade.failed", "reason", String.valueOf(response.errorMessage));
+            return done(OperationResult.fail("upgrade.failed", "reason", String.valueOf(response.errorMessage)));
         }
-        Optional<BankDatabase.Change<Outcome>> saved = database.change(shared(accountId, label), current ->
-                levelUp(current, account.level(), next, "COOP_UPGRADE", "account.upgrade.max-level", OperationResult.silent()));
-        if (saved.isEmpty() || !saved.get().written()) {
-            compensateDeposit(purse, next.upgradeMoneyCost(), "account upgrade");
-            return saved.isEmpty() ? OperationResult.fail("upgrade.refunded") : saved.get().result().result();
-        }
-        removeItems(purse, next.itemRequirements());
-        return OperationResult.silent();
+        BankDatabase.NewAccount key = shared(accountId, label);
+        return this.<Outcome>save(blocking, "shared account upgrade " + accountId, () -> database.change(key, current ->
+                levelUp(current, account.level(), next, "COOP_UPGRADE", "account.upgrade.max-level", OperationResult.silent())))
+                .thenCompose(saved -> {
+                    if (saved.isEmpty() || !saved.get().written()) {
+                        compensateDeposit(purse, next.upgradeMoneyCost(), "account upgrade");
+                        return done(saved.isEmpty() ? OperationResult.fail("upgrade.refunded") : saved.get().result().result());
+                    }
+                    if (stillHasItems(purse, next.itemRequirements())) {
+                        removeItems(purse, next.itemRequirements());
+                        return done(OperationResult.silent());
+                    }
+                    return this.<Boolean>save(blocking, "undo shared account upgrade " + accountId, () -> database.change(key, current ->
+                            undoLevelUp(current, account.level(), next, "COOP_UPGRADE_REVERTED"))).thenApply(undone -> {
+                        if (undone.isEmpty() || !undone.get().written()) {
+                            logKeptUpgrade(purse, accountId);
+                            return OperationResult.silent();
+                        }
+                        compensateDeposit(purse, next.upgradeMoneyCost(), "account upgrade");
+                        return OperationResult.fail("upgrade.missing-items", "items", joinItems(getMissingItems(purse, next.itemRequirements())));
+                    });
+                });
+    }
+
+    private void logKeptUpgrade(Player player, UUID accountId) {
+        plugin.getLogger().severe("RoyalBank: bank account " + accountId + " was upgraded and paid for by " + player.getName()
+                + " (" + player.getUniqueId() + "), but the upgrade items were gone before they could be taken and the"
+                + " upgrade could not be undone. MANUAL RECONCILIATION NEEDED.");
     }
 
     @Override
     public List<TransactionView> getAccountTransactions(UUID accountId, int limit) {
         List<TransactionView> out = new ArrayList<>();
-        for (BankTransaction t : database.getRecentTransactions(accountId, limit)) {
+        for (BankTransaction t : onDbBlocking("read shared account transactions " + accountId,
+                () -> database.getRecentTransactions(accountId, limit)).join()) {
             out.add(new TransactionView(t.type(), t.amount(), t.balanceAfter(), t.createdAt(), t.note()));
         }
         return out;
     }
 
-    public OperationResult upgrade(Player player) {
-        BankAccount account = freshAccount(player);
+    public CompletableFuture<OperationResult> upgrade(Player player) {
+        return guarded(player.getUniqueId(), "upgrade", () -> accountFor(player).thenCompose(account -> upgradeFrom(player, account)));
+    }
+
+    private CompletableFuture<OperationResult> upgradeFrom(Player player, BankAccount account) {
         BankLevel nextLevel = levelManager.getNextLevel(account.level()).orElse(null);
         if (nextLevel == null) {
-            return OperationResult.fail("upgrade.max-level");
+            return done(OperationResult.fail("upgrade.max-level"));
         }
 
         if (!upgradeUnlocked(player, account)) {
-            return OperationResult.fail("upgrade.locked", "required", money(getUpgradeUnlockCombinedBalance()));
+            return done(OperationResult.fail("upgrade.locked", "required", money(getUpgradeUnlockCombinedBalance())));
         }
 
         if (!vaultHook.getEconomy().has(player, nextLevel.upgradeMoneyCost())) {
-            return OperationResult.fail("upgrade.not-enough-money", "cost", money(nextLevel.upgradeMoneyCost()));
+            return done(OperationResult.fail("upgrade.not-enough-money", "cost", money(nextLevel.upgradeMoneyCost())));
         }
 
         List<String> missingItems = getMissingItems(player, nextLevel.itemRequirements());
         if (!missingItems.isEmpty()) {
-            return OperationResult.fail("upgrade.missing-items", "items", joinItems(missingItems));
+            return done(OperationResult.fail("upgrade.missing-items", "items", joinItems(missingItems)));
         }
 
         EconomyResponse response = vaultHook.getEconomy().withdrawPlayer(player, nextLevel.upgradeMoneyCost());
         if (!response.transactionSuccess()) {
-            return OperationResult.fail("upgrade.failed", "reason", String.valueOf(response.errorMessage));
+            return done(OperationResult.fail("upgrade.failed", "reason", String.valueOf(response.errorMessage)));
         }
 
-        Optional<BankDatabase.Change<Outcome>> saved = database.change(personal(player), current ->
+        BankDatabase.NewAccount key = personal(player);
+        return this.<Outcome>save(false, "upgrade for " + key.username(), () -> database.change(key, current ->
                 levelUp(current, account.level(), nextLevel, "UPGRADE", "upgrade.max-level",
-                        OperationResult.success("upgrade.success", "level_name", nextLevel.name())));
-        if (saved.isEmpty() || !saved.get().written()) {
-            // items have not been removed yet, so refunding the money is enough
-            boolean refunded = compensateDeposit(player, nextLevel.upgradeMoneyCost(), "upgrade");
-            if (!refunded) {
-                return OperationResult.fail("upgrade.needs-staff");
+                        OperationResult.success("upgrade.success", "level_name", nextLevel.name())))).thenCompose(saved -> {
+            if (saved.isEmpty() || !saved.get().written()) {
+                // items have not been removed yet, so refunding the money is enough
+                boolean refunded = compensateDeposit(player, nextLevel.upgradeMoneyCost(), "upgrade");
+                if (!refunded) {
+                    return done(OperationResult.fail("upgrade.needs-staff"));
+                }
+                return done(saved.isEmpty() ? OperationResult.fail("upgrade.refunded") : saved.get().result().result());
             }
-            return saved.isEmpty() ? OperationResult.fail("upgrade.refunded") : saved.get().result().result();
-        }
 
-        // consume items only after the level grant is committed
-        removeItems(player, nextLevel.itemRequirements());
-        cacheIfOnline(saved.get().account());
-        return saved.get().result().result();
+            // the items were checked before the save, a tick or two ago; check again before taking them
+            if (stillHasItems(player, nextLevel.itemRequirements())) {
+                removeItems(player, nextLevel.itemRequirements());
+                cacheIfOnline(saved.get().account());
+                return done(saved.get().result().result());
+            }
+            return this.<Boolean>save(false, "undo upgrade for " + key.username(), () -> database.change(key, current ->
+                    undoLevelUp(current, account.level(), nextLevel, "UPGRADE_REVERTED"))).thenApply(undone -> {
+                if (undone.isEmpty() || !undone.get().written()) {
+                    logKeptUpgrade(player, player.getUniqueId());
+                    cacheIfOnline(saved.get().account());
+                    return saved.get().result().result();
+                }
+                cacheIfOnline(undone.get().account());
+                if (!compensateDeposit(player, nextLevel.upgradeMoneyCost(), "upgrade")) {
+                    return OperationResult.fail("upgrade.needs-staff");
+                }
+                return OperationResult.fail("upgrade.missing-items", "items", joinItems(getMissingItems(player, nextLevel.itemRequirements())));
+            });
+        });
     }
 
-    // payout: interest to hand to the purse through Vault before the claim can be written
-    private record InterestClaim(OperationResult result, double before, double after, double paid, double payout) {
+    // payout: interest to hand to the purse; claimBefore and minBefore put the claim back if that payment fails
+    private record InterestClaim(OperationResult result, double before, double after, double paid, double payout,
+                                 long claimBefore, double minBefore) {
         static InterestClaim of(OperationResult result) {
-            return new InterestClaim(result, 0.0, 0.0, 0.0, 0.0);
+            return new InterestClaim(result, 0.0, 0.0, 0.0, 0.0, 0L, 0.0);
         }
     }
 
-    // what a claim does to this account; alreadyPaid is what the purse has already been given for it
-    private BankDatabase.Change<InterestClaim> interestRule(BankAccount account, long now, boolean manual, boolean payToBank,
-                                                           double alreadyPaid) {
+    // what a claim does to this account
+    private BankDatabase.Change<InterestClaim> interestRule(BankAccount account, long now, boolean manual, boolean payToBank) {
         long cooldownSeconds = interestCooldownHours() * 3600L;
         long nextAllowed = account.lastInterestClaim() + cooldownSeconds;
         if (account.lastInterestClaim() > 0 && now < nextAllowed) {
@@ -689,9 +984,6 @@ public final class BankService implements Listener, RoyalBankAPI {
         double interest = round(nextInterest(account, level));
 
         if (interest <= 0) {
-            if (alreadyPaid > 0.0) {
-                return BankDatabase.Change.none(InterestClaim.of(OperationResult.fail("interest.reverted")));
-            }
             // keep the cooldown when the balance itself earns nothing, so an auto-claim on an empty bank costs nothing
             if (round(calculateInterest(account.balance(), level)) <= 0) {
                 return BankDatabase.Change.none(InterestClaim.of(
@@ -713,60 +1005,78 @@ public final class BankService implements Listener, RoyalBankAPI {
             return BankDatabase.Change.write(account.withBalance(newBalance).withInterestClaimed(now),
                     List.of(ledger(account, "INTEREST", actuallyPaid, newBalance, messages.get("notes.interest"))),
                     new InterestClaim(OperationResult.success("interest.paid-to-bank", "amount", money(actuallyPaid)),
-                            account.balance(), newBalance, actuallyPaid, 0.0));
+                            account.balance(), newBalance, actuallyPaid, 0.0, account.lastInterestClaim(), account.minBalanceSinceClaim()));
         }
 
-        if (Math.abs(alreadyPaid - interest) > 1e-9) {
-            return BankDatabase.Change.none(new InterestClaim(OperationResult.fail("interest.reverted"), 0.0, 0.0, 0.0, interest));
-        }
         return BankDatabase.Change.write(account.withInterestClaimed(now),
                 List.of(ledger(account, "INTEREST", interest, account.balance(), messages.get("notes.interest-to-purse"))),
                 new InterestClaim(OperationResult.success("interest.paid-to-purse", "amount", money(interest)),
-                        account.balance(), account.balance(), interest, 0.0));
+                        account.balance(), account.balance(), interest, interest, account.lastInterestClaim(), account.minBalanceSinceClaim()));
     }
 
-    public OperationResult claimInterest(Player player, boolean manual) {
+    // only while the claim is still this one; a later claim started its own period
+    private BankDatabase.Change<Boolean> restoreClaim(BankAccount current, InterestClaim claim, long claimedAt) {
+        if (current.lastInterestClaim() != claimedAt) {
+            return BankDatabase.Change.none(Boolean.FALSE);
+        }
+        return BankDatabase.Change.write(
+                current.withClaimRestored(claim.claimBefore(), Math.min(claim.minBefore(), current.minBalanceSinceClaim())),
+                List.of(ledger(current, "INTEREST_REVERTED", claim.payout(), current.balance(), messages.get("notes.interest-reverted"))),
+                Boolean.TRUE);
+    }
+
+    public CompletableFuture<OperationResult> claimInterest(Player player, boolean manual) {
+        return guarded(player.getUniqueId(), "interest claim", () -> claimFlow(player, manual));
+    }
+
+    private CompletableFuture<OperationResult> claimFlow(Player player, boolean manual) {
         if (manual && !plugin.getConfig().getBoolean("settings.interest-command-enabled", true)) {
-            return OperationResult.fail("interest.disabled");
+            return done(OperationResult.fail("interest.disabled"));
         }
 
         long now = Instant.now().getEpochSecond();
         boolean payToBank = plugin.getConfig().getBoolean("settings.pay-interest-to-bank", true);
-        BankDatabase.Change<InterestClaim> plan = interestRule(freshAccount(player), now, manual, payToBank, 0.0);
-        double payout = plan.result().payout();
-        if (!plan.written() && payout <= 0.0) {
-            return plan.result().result();
-        }
+        BankDatabase.NewAccount key = personal(player);
+        return this.<InterestClaim>save(false, "interest claim for " + key.username(),
+                () -> database.change(key, current -> interestRule(current, now, manual, payToBank))).thenCompose(saved -> {
+            if (saved.isEmpty()) {
+                return done(OperationResult.fail("interest.not-saved"));
+            }
+            if (!saved.get().written()) {
+                return done(saved.get().result().result());
+            }
+            cacheIfOnline(saved.get().account());
+            InterestClaim claim = saved.get().result();
+            if (claim.payout() > 0.0) {
+                EconomyResponse response = vaultHook.getEconomy().depositPlayer(player, claim.payout());
+                if (!response.transactionSuccess()) {
+                    return putBackClaim(player, key, claim, now,
+                            OperationResult.fail("interest.failed", "reason", String.valueOf(response.errorMessage)));
+                }
+            }
+            if (claim.paid() > 0.0) {
+                // incoming: compounding on a parked balance is part of the parking signal
+                report(player.getUniqueId(), player.getName(), payToBank ? "interest" : "interest-to-purse", claim.paid(),
+                        claim.before(), claim.after(), true, null, null);
+            }
+            return done(claim.result());
+        });
+    }
 
-        if (payout > 0.0) {
-            EconomyResponse response = vaultHook.getEconomy().depositPlayer(player, payout);
-            if (!response.transactionSuccess()) {
-                return OperationResult.fail("interest.failed", "reason", String.valueOf(response.errorMessage));
+    // the purse payment failed, so the claim never happened: the next claim may pay this period again
+    private CompletableFuture<OperationResult> putBackClaim(Player player, BankDatabase.NewAccount key, InterestClaim claim,
+                                                            long claimedAt, OperationResult failed) {
+        return this.<Boolean>save(false, "put back interest claim for " + key.username(),
+                () -> database.change(key, current -> restoreClaim(current, claim, claimedAt))).thenApply(back -> {
+            if (back.isPresent() && back.get().written()) {
+                cacheIfOnline(back.get().account());
+                return failed;
             }
-        }
-        Optional<BankDatabase.Change<InterestClaim>> saved = database.change(personal(player),
-                current -> interestRule(current, now, manual, payToBank, payout));
-        if (saved.isEmpty() || !saved.get().written()) {
-            if (payout <= 0.0) {
-                return saved.isEmpty() || saved.get().result().payout() > 0.0
-                        ? OperationResult.fail("interest.not-saved")
-                        : saved.get().result().result();
-            }
-            // or the next claim pays the interest twice
-            boolean clawedBack = compensateWithdraw(player, payout, "interest payout");
-            if (!clawedBack) {
-                return OperationResult.fail("interest.needs-staff");
-            }
-            return saved.isEmpty() ? OperationResult.fail("interest.reverted") : saved.get().result().result();
-        }
-        InterestClaim claim = saved.get().result();
-        cacheIfOnline(saved.get().account());
-        if (claim.paid() > 0.0) {
-            // incoming: compounding on a parked balance is part of the parking signal
-            report(player.getUniqueId(), player.getName(), payToBank ? "interest" : "interest-to-purse", claim.paid(),
-                    claim.before(), claim.after(), true, null, null);
-        }
-        return claim.result();
+            plugin.getLogger().severe("RoyalBank: the interest of " + money(claim.payout()) + " for " + player.getName()
+                    + " (" + player.getUniqueId() + ") was recorded but not paid, and the claim could not be put back."
+                    + " MANUAL RECONCILIATION NEEDED.");
+            return OperationResult.fail("interest.needs-staff");
+        });
     }
 
     public BankLevel getEffectiveLevel(int level) {
@@ -779,25 +1089,48 @@ public final class BankService implements Listener, RoyalBankAPI {
                 .orElseThrow();
     }
 
-    private OperationResult adminChange(OfflinePlayer player, OperationResult notSaved, BankDatabase.Rule<OperationResult> rule) {
-        Optional<BankDatabase.Change<OperationResult>> saved = database.change(personal(player), rule);
-        if (saved.isEmpty()) {
-            return notSaved;
-        }
-        if (saved.get().written()) {
-            cacheIfOnline(saved.get().account());
-        }
-        return saved.get().result();
+    private CompletableFuture<OperationResult> adminChange(OfflinePlayer player, OperationResult notSaved,
+                                                           BankDatabase.Rule<OperationResult> rule) {
+        BankDatabase.NewAccount key = personal(player);
+        return this.<OperationResult>save(false, "admin change for " + key.username(), () -> database.change(key, rule))
+                .thenApply(saved -> {
+                    if (saved.isEmpty()) {
+                        return notSaved;
+                    }
+                    if (saved.get().written()) {
+                        cacheIfOnline(saved.get().account());
+                    }
+                    return saved.get().result();
+                });
     }
 
-    public OperationResult setBalance(OfflinePlayer player, double amount) {
+    /** The stored row for /bank admin balance, created at the starting level when missing. */
+    public CompletableFuture<BankAccount> adminAccount(OfflinePlayer player) {
+        BankDatabase.NewAccount key = personal(player);
+        return onDb("admin read of " + key.username(), () -> database.getOrCreateAccount(key));
+    }
+
+    public CompletableFuture<List<BankTransaction>> getRecentTransactions(UUID account, int limit) {
+        return onDb("read transactions of " + account, () -> database.getRecentTransactions(account, limit));
+    }
+
+    // queued behind bank actions, so on SQLite's single connection they wait instead of freezing the server
+    public CompletableFuture<Integer> pruneTransactions(int maxPerPlayer) {
+        return onDb("prune bank transactions", () -> database.pruneTransactions(maxPerPlayer));
+    }
+
+    public CompletableFuture<Boolean> backup(Path target) {
+        return onDb("back up the bank database", () -> database.backupTo(target));
+    }
+
+    public CompletableFuture<OperationResult> setBalance(OfflinePlayer player, double amount) {
         if (!Double.isFinite(amount) || amount < 0.0) {
-            return OperationResult.fail("admin.result.invalid-amount");
+            return done(OperationResult.fail("admin.result.invalid-amount"));
         }
         double sanitized = Amounts.roundNonNegative(plugin, amount);
         double maxTransaction = plugin.getConfig().getDouble("settings.amount-limits.max-transaction", 1_000_000_000_000.0);
         if (maxTransaction > 0.0 && sanitized > maxTransaction) {
-            return OperationResult.fail("admin.result.above-limit");
+            return done(OperationResult.fail("admin.result.above-limit"));
         }
         return adminChange(player, OperationResult.fail("admin.result.balance-not-saved"), account -> {
             BankLevel level = getEffectiveLevel(account.level());
@@ -813,10 +1146,10 @@ public final class BankService implements Listener, RoyalBankAPI {
         });
     }
 
-    public OperationResult addBalance(OfflinePlayer player, double amount) {
+    public CompletableFuture<OperationResult> addBalance(OfflinePlayer player, double amount) {
         double sanitized = Amounts.sanitize(plugin, amount);
         if (sanitized <= 0.0) {
-            return OperationResult.fail("admin.result.invalid-amount");
+            return done(OperationResult.fail("admin.result.invalid-amount"));
         }
         return adminChange(player, OperationResult.fail("admin.result.balance-not-saved"), account -> {
             BankLevel level = getEffectiveLevel(account.level());
@@ -833,10 +1166,10 @@ public final class BankService implements Listener, RoyalBankAPI {
         });
     }
 
-    public OperationResult removeBalance(OfflinePlayer player, double amount) {
+    public CompletableFuture<OperationResult> removeBalance(OfflinePlayer player, double amount) {
         double sanitized = Amounts.sanitize(plugin, amount);
         if (sanitized <= 0.0) {
-            return OperationResult.fail("admin.result.invalid-amount");
+            return done(OperationResult.fail("admin.result.invalid-amount"));
         }
         return adminChange(player, OperationResult.fail("admin.result.balance-not-saved"), account -> {
             double newBalance = round(Math.max(0.0, account.balance() - sanitized));
@@ -848,10 +1181,10 @@ public final class BankService implements Listener, RoyalBankAPI {
         });
     }
 
-    public OperationResult setLevel(OfflinePlayer player, int level) {
+    public CompletableFuture<OperationResult> setLevel(OfflinePlayer player, int level) {
         BankLevel bankLevel = levelManager.getLevel(level).orElse(null);
         if (bankLevel == null) {
-            return OperationResult.fail("admin.result.unknown-level", "level", String.valueOf(level));
+            return done(OperationResult.fail("admin.result.unknown-level", "level", String.valueOf(level)));
         }
         return adminChange(player, OperationResult.fail("admin.result.level-not-saved"), account -> {
             double clampedBalance = round(Math.min(account.balance(), bankLevel.maxBalance()));
@@ -867,7 +1200,7 @@ public final class BankService implements Listener, RoyalBankAPI {
         });
     }
 
-    public OperationResult resetAccount(OfflinePlayer player) {
+    public CompletableFuture<OperationResult> resetAccount(OfflinePlayer player) {
         return adminChange(player, OperationResult.fail("admin.result.reset-not-saved"), account -> {
             BankAccount updated = new BankAccount(account.uuid(), account.username(), 0.0, levelManager.getStartingLevel(), 0L, false);
             return BankDatabase.Change.write(updated, List.of(ledger(account, "ADMIN_RESET", 0.0, 0.0, messages.get("notes.admin-reset"))),
@@ -945,9 +1278,6 @@ public final class BankService implements Listener, RoyalBankAPI {
         return player.getStatistic(org.bukkit.Statistic.PLAY_ONE_MINUTE) / 20.0 / 3600.0;
     }
 
-    public List<BankTransaction> getRecentTransactions(Player player, int limit) {
-        return database.getRecentTransactions(player.getUniqueId(), limit);
-    }
 
     public String getInterestTimeRemaining(Player player) {
         BankAccount account = getAccount(player);
