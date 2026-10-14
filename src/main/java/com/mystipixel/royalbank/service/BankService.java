@@ -40,10 +40,8 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 
 public final class BankService implements Listener, RoyalBankAPI {
@@ -58,7 +56,7 @@ public final class BankService implements Listener, RoyalBankAPI {
     private AuditSink auditSink;
 
     // online players only, for display; every change writes the DB first, then refreshes this from the committed row
-    private final Map<UUID, BankAccount> cache = new ConcurrentHashMap<>();
+    private final AccountCache cache = new AccountCache();
 
     public BankService(JavaPlugin plugin, BankDatabase database, LevelManager levelManager, VaultHook vaultHook,
                        MessageManager messages) {
@@ -69,6 +67,10 @@ public final class BankService implements Listener, RoyalBankAPI {
         this.messages = messages;
         this.abuseMonitor = new AbuseMonitor(plugin, messages);
         this.auditSink = new LocalAuditSink(abuseMonitor);
+    }
+
+    public AccountCache accountCache() {
+        return cache;
     }
 
     public AbuseMonitor getAbuseMonitor() {
@@ -124,7 +126,7 @@ public final class BankService implements Listener, RoyalBankAPI {
     }
 
     public void loadAccount(Player player) {
-        cache.put(player.getUniqueId(), database.getOrCreateAccount(player, levelManager.getStartingLevel()));
+        cache.put(database.getOrCreateAccount(player, levelManager.getStartingLevel()));
     }
 
     public void unloadAccount(UUID uuid) {
@@ -133,21 +135,18 @@ public final class BankService implements Listener, RoyalBankAPI {
 
     // for display only: money decisions re-read the locked row inside their transaction
     public BankAccount getAccount(Player player) {
-        BankAccount cached = cache.get(player.getUniqueId());
-        if (cached != null) {
-            return cached;
+        Optional<BankAccount> cached = cache.get(player.getUniqueId());
+        if (cached.isPresent()) {
+            return cached.get();
         }
         BankAccount loaded = database.getOrCreateAccount(player, levelManager.getStartingLevel());
         // online check stops a load racing a quit from resurrecting an evicted entry
-        if (player.isOnline()) {
-            cache.put(player.getUniqueId(), loaded);
-        }
-        return loaded;
+        return player.isOnline() ? cache.put(loaded) : loaded;
     }
 
     /** Cache only, no database fallback. Safe from any thread. */
-    public java.util.Optional<BankAccount> getCachedAccount(UUID uuid) {
-        return java.util.Optional.ofNullable(cache.get(uuid));
+    public Optional<BankAccount> getCachedAccount(UUID uuid) {
+        return cache.get(uuid);
     }
 
     // the stored row, for the checks made before money moves through Vault; also refreshes the cache
@@ -155,14 +154,14 @@ public final class BankService implements Listener, RoyalBankAPI {
         BankAccount account = database.getAccount(player.getUniqueId())
                 .orElseGet(() -> database.getOrCreateAccount(player, levelManager.getStartingLevel()));
         if (player.isOnline()) {
-            cache.put(player.getUniqueId(), account);
+            cache.put(account);
         }
         return account;
     }
 
     private void cacheIfOnline(BankAccount account) {
         if (Bukkit.getPlayer(account.uuid()) != null) {
-            cache.put(account.uuid(), account);
+            cache.put(account);
         }
     }
 
@@ -400,9 +399,9 @@ public final class BankService implements Listener, RoyalBankAPI {
         String name = database.getAccount(playerId).map(BankAccount::username).orElse(nameOf(playerId));
         BankAccount updated = new BankAccount(playerId, name, round(snapshot.balance()),
                 snapshot.level(), snapshot.lastInterestClaim(), snapshot.bonusClaimed());
-        if (database.saveAccount(updated)) {
-            cacheIfOnline(updated);
-        }
+        database.change(new BankDatabase.NewAccount(playerId, name, updated.level(), false),
+                        current -> BankDatabase.Change.write(updated, List.of(), Boolean.TRUE))
+                .ifPresent(saved -> cacheIfOnline(saved.account()));
     }
 
     @Override

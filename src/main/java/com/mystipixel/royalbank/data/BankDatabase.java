@@ -18,12 +18,14 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.logging.Level;
+import javax.sql.DataSource;
 
 /**
  * SQLite or MySQL behind one HikariCP pool. Driver and pool come from Paper's library loader
@@ -47,10 +49,11 @@ public final class BankDatabase {
             "INSERT INTO bank_transactions (uuid, type, amount, balance_after, created_at, note) VALUES (?, ?, ?, ?, ?, ?)";
     private static final String SELECT_ACCOUNT_SQL =
             "SELECT uuid, username, balance, level, last_interest_claim, bonus_claimed,"
-                    + " COALESCE(min_balance_since_claim, balance) AS min_balance FROM player_banks WHERE uuid = ?";
+                    + " COALESCE(min_balance_since_claim, balance) AS min_balance, version FROM player_banks WHERE uuid = ?";
     private static final String UPDATE_ACCOUNT_SQL =
             "UPDATE player_banks SET username = ?, balance = ?, level = ?, last_interest_claim = ?, bonus_claimed = ?,"
                     + " min_balance_since_claim = ?, version = version + 1 WHERE uuid = ?";
+    private static final String SELECT_VERSION_SQL = "SELECT version FROM player_banks WHERE uuid = ?";
 
     /** The row to create when an account does not exist yet; rename also updates the stored name. */
     public record NewAccount(UUID uuid, String username, int level, boolean rename) {
@@ -183,6 +186,15 @@ public final class BankDatabase {
 
     private boolean mysql() {
         return type == Type.MYSQL;
+    }
+
+    public Type type() {
+        return type;
+    }
+
+    /** The pool, for read-only queries such as the version poll. Null before connect() or after close(). */
+    public DataSource dataSource() {
+        return dataSource;
     }
 
     // each step checks before it changes anything: on MySQL a server that dies half way runs it again
@@ -349,6 +361,23 @@ public final class BankDatabase {
         }
     }
 
+    /** The stored rows of these accounts in one connection; ids without a row are left out. */
+    public List<BankAccount> getAccounts(Collection<UUID> ids) throws SQLException {
+        List<BankAccount> accounts = new ArrayList<>(ids.size());
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(SELECT_ACCOUNT_SQL)) {
+            for (UUID id : ids) {
+                statement.setString(1, id.toString());
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    if (resultSet.next()) {
+                        accounts.add(readAccount(resultSet));
+                    }
+                }
+            }
+        }
+        return accounts;
+    }
+
     /** Replaces every field of the account, as a profile swap does. Returns false (and logs) on failure. */
     public boolean saveAccount(BankAccount account) {
         NewAccount key = new NewAccount(account.uuid(), account.username(), account.level(), false);
@@ -361,9 +390,7 @@ public final class BankDatabase {
      */
     public <R> Optional<Change<R>> change(NewAccount key, Rule<R> rule) {
         return run(key.uuid().toString(), tx -> {
-            Change<R> change = rule.decide(lockOrCreate(tx, key));
-            apply(tx, change);
-            return change;
+            return apply(tx, rule.decide(lockOrCreate(tx, key)));
         });
     }
 
@@ -382,9 +409,7 @@ public final class BankDatabase {
                     lockedSecond = locked;
                 }
             }
-            Change<R> change = rule.decide(lockedFirst, lockedSecond);
-            apply(tx, change);
-            return change;
+            return apply(tx, rule.decide(lockedFirst, lockedSecond));
         });
     }
 
@@ -394,9 +419,7 @@ public final class BankDatabase {
             BankAccount current = lockOrCreate(tx, key);
             List<CoopContribution> depositors = depositors(tx, key.uuid());
             long nextSeq = depositors.stream().mapToLong(CoopContribution::seq).max().orElse(0L) + 1;
-            Change<R> change = rule.decide(current, depositors.stream().filter(d -> d.amount() > CONTRIBUTION_EPSILON).toList(), nextSeq);
-            apply(tx, change);
-            return change;
+            return apply(tx, rule.decide(current, depositors.stream().filter(d -> d.amount() > CONTRIBUTION_EPSILON).toList(), nextSeq));
         });
     }
 
@@ -430,7 +453,7 @@ public final class BankDatabase {
                 statement.setString(2, key.uuid().toString());
                 statement.executeUpdate();
             }
-            account = account.withUsername(key.username());
+            account = account.withUsername(key.username()).withVersion(account.version() + 1);
         }
         return account;
     }
@@ -452,7 +475,8 @@ public final class BankDatabase {
                 resultSet.getInt("level"),
                 resultSet.getLong("last_interest_claim"),
                 resultSet.getInt("bonus_claimed") != 0,
-                resultSet.getDouble("min_balance"));
+                resultSet.getDouble("min_balance"),
+                resultSet.getLong("version"));
     }
 
     // a locking read, so on MySQL it sees the last committed rows rather than the transaction's snapshot
@@ -476,12 +500,15 @@ public final class BankDatabase {
         return rows;
     }
 
-    private void apply(Tx tx, Change<?> change) throws SQLException {
+    // returns the change with each written account carrying its new stored version
+    private <R> Change<R> apply(Tx tx, Change<R> change) throws SQLException {
         if (!change.written()) {
-            return;
+            return change;
         }
         Connection connection = tx.connection();
-        try (PreparedStatement statement = connection.prepareStatement(UPDATE_ACCOUNT_SQL)) {
+        List<BankAccount> stored = new ArrayList<>(change.accounts().size());
+        try (PreparedStatement statement = connection.prepareStatement(UPDATE_ACCOUNT_SQL);
+             PreparedStatement versionStatement = connection.prepareStatement(SELECT_VERSION_SQL)) {
             for (BankAccount account : change.accounts()) {
                 statement.setString(1, account.username());
                 statement.setDouble(2, account.balance());
@@ -493,6 +520,13 @@ public final class BankDatabase {
                 if (statement.executeUpdate() != 1) {
                     throw new SQLException("Bank account " + account.uuid() + " was not locked before writing");
                 }
+                versionStatement.setString(1, account.uuid().toString());
+                try (ResultSet row = versionStatement.executeQuery()) {
+                    if (!row.next()) {
+                        throw new SQLException("Bank account " + account.uuid() + " is missing after writing");
+                    }
+                    stored.add(account.withVersion(row.getLong(1)));
+                }
             }
         }
         try (PreparedStatement statement = connection.prepareStatement(INSERT_TRANSACTION_SQL)) {
@@ -502,6 +536,7 @@ public final class BankDatabase {
             }
         }
         applyContributionChanges(connection, tx.dialect(), change.contributions());
+        return new Change<>(List.copyOf(stored), change.ledger(), change.contributions(), change.result());
     }
 
     private void applyContributionChanges(Connection connection, Dialect dialect, List<CoopContribution> changes) throws SQLException {

@@ -1,6 +1,7 @@
 package com.mystipixel.royalbank;
 
 import com.mystipixel.royalbank.command.BankCommand;
+import com.mystipixel.royalbank.service.BalanceRefresher;
 import com.mystipixel.royalbank.service.BankService;
 import com.mystipixel.royalbank.config.ConfigValidator;
 import com.mystipixel.royalbank.config.LevelManager;
@@ -10,6 +11,8 @@ import com.mystipixel.royalbank.gui.TextInput;
 import com.mystipixel.royalbank.hooks.RoyalBankPlaceholderExpansion;
 import com.mystipixel.royalbank.hooks.VaultHook;
 import com.mystipixel.royalbank.message.MessageManager;
+import com.mystipixel.royalcommon.storage.DbExecutor;
+import com.mystipixel.royalcommon.storage.MainThread;
 import net.milkbowl.vault.economy.Economy;
 import org.bstats.bukkit.Metrics;
 import org.bstats.charts.SimplePie;
@@ -20,6 +23,8 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.server.ServiceRegisterEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.time.Duration;
+
 public final class RoyalBankPlugin extends JavaPlugin {
 
     // identifies the plugin, not the server, so it is fixed rather than configurable
@@ -28,6 +33,8 @@ public final class RoyalBankPlugin extends JavaPlugin {
     private BankDatabase database;
     private LevelManager levelManager;
     private BankService bankService;
+    private DbExecutor dbExecutor;
+    private BalanceRefresher balanceRefresher;
     private BankGui bankGui;
     private TextInput textInput;
     private MessageManager messageManager;
@@ -104,6 +111,7 @@ public final class RoyalBankPlugin extends JavaPlugin {
         for (Player player : getServer().getOnlinePlayers()) {
             bankService.loadAccount(player);
         }
+        setupBalanceRefresher();
 
         getLogger().info("RoyalBank enabled with " + levelManager.getLevels().size() + " configured levels.");
     }
@@ -130,8 +138,40 @@ public final class RoyalBankPlugin extends JavaPlugin {
         }
     }
 
+    // SQLite is one server's own file, so nothing else changes its rows and the cache needs no refresh
+    private void setupBalanceRefresher() {
+        if (database.type() != BankDatabase.Type.MYSQL) {
+            return;
+        }
+        dbExecutor = new DbExecutor(getName(), MainThread.bukkit(this), getLogger());
+        balanceRefresher = new BalanceRefresher(bankService.accountCache(), database, dbExecutor);
+        startBalanceRefresher();
+    }
+
+    private void startBalanceRefresher() {
+        if (balanceRefresher == null) {
+            return;
+        }
+        balanceRefresher.stop();
+        int seconds = getConfig().getInt("storage.refresh-seconds", 5);
+        if (seconds > 0) {
+            balanceRefresher.start(this, seconds);
+        }
+    }
+
+    /** Null on SQLite. */
+    public BalanceRefresher getBalanceRefresher() {
+        return balanceRefresher;
+    }
+
     @Override
     public void onDisable() {
+        if (balanceRefresher != null) {
+            balanceRefresher.stop();
+        }
+        if (dbExecutor != null) {
+            dbExecutor.shutdown(Duration.ofSeconds(5));
+        }
         if (textInput != null) {
             textInput.shutdown();
         }
@@ -203,6 +243,7 @@ public final class RoyalBankPlugin extends JavaPlugin {
         }
         new ConfigValidator(this, levelManager).validate();
         pruneTransactionsIfEnabled();
+        startBalanceRefresher();
     }
 
     public BankDatabase getDatabase() {

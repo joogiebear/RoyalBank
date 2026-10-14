@@ -41,13 +41,16 @@ transactions:
   max-per-player: 100
   prune-on-startup: true
 
-# Storage backend. SQLITE (default) or MYSQL. Each server needs its own database for now: sharing one
-# between servers is planned but not safe yet, because servers can overwrite each other's data.
+# Storage backend. SQLITE (default, one server) or MYSQL. Several servers can share one MySQL database.
+# Database work still runs on the main thread; moving it off is planned for a later release.
 storage:
   type: SQLITE
   sqlite-file: "bank.db"
   # Seconds a bank action waits for a free database connection before it gives up.
   connection-timeout-seconds: 10
+  # MYSQL only: how often (seconds) balances shown to online players pick up changes made on another
+  # server. Opening /bank always re-reads the player's own account. 0 turns the timed check off.
+  refresh-seconds: 5
   mysql:
     host: localhost
     port: 3306
