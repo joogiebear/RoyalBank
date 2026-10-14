@@ -27,6 +27,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -43,6 +44,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
 
     // keyed by sender; expired entries are ignored
     private final Map<UUID, PendingTransfer> pendingTransfers = new ConcurrentHashMap<>();
+    private final Map<String, OfflinePlayer> lookedUp = new ConcurrentHashMap<>();
 
     private record PendingTransfer(UUID recipient, double amount, long createdAt) {
     }
@@ -194,7 +196,15 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
             messages.send(player, "transfer.usage");
             return;
         }
-        OfflinePlayer target = knownPlayer(args[1]);
+        Lookup lookup = knownPlayer(args[1], () -> {
+            if (player.isOnline()) {
+                handleTransfer(player, args);
+            }
+        });
+        if (lookup.pending()) {
+            return;
+        }
+        OfflinePlayer target = lookup.player();
         // Reject names that have never joined, so a typo cannot silently create a junk "ghost" account.
         if (target == null || (!target.hasPlayedBefore() && !target.isOnline())) {
             messages.send(player, "admin.unknown-player", "player", args[1]);
@@ -245,7 +255,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     }
 
     private void handleAdminBalance(CommandSender sender, String[] args) {
-        OfflinePlayer target = target(sender, args, 2);
+        OfflinePlayer target = target(sender, args, 2, () -> handleAdminBalance(sender, args));
         if (target == null) {
             return;
         }
@@ -256,34 +266,43 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     }
 
     private void handleAdminSetBalance(CommandSender sender, String[] args) {
-        OfflinePlayer target = target(sender, args, 2);
+        OfflinePlayer target = target(sender, args, 2, () -> handleAdminSetBalance(sender, args));
+        if (target == null) {
+            return;
+        }
         Double amount = parseAdminAmount(sender, args, 3, "admin.usage.setbalance", true);
-        if (target == null || amount == null) {
+        if (amount == null) {
             return;
         }
         reply(sender, bankService.setBalance(target, amount));
     }
 
     private void handleAdminAddBalance(CommandSender sender, String[] args) {
-        OfflinePlayer target = target(sender, args, 2);
+        OfflinePlayer target = target(sender, args, 2, () -> handleAdminAddBalance(sender, args));
+        if (target == null) {
+            return;
+        }
         Double amount = parseAdminAmount(sender, args, 3, "admin.usage.addbalance", false);
-        if (target == null || amount == null) {
+        if (amount == null) {
             return;
         }
         reply(sender, bankService.addBalance(target, amount));
     }
 
     private void handleAdminRemoveBalance(CommandSender sender, String[] args) {
-        OfflinePlayer target = target(sender, args, 2);
+        OfflinePlayer target = target(sender, args, 2, () -> handleAdminRemoveBalance(sender, args));
+        if (target == null) {
+            return;
+        }
         Double amount = parseAdminAmount(sender, args, 3, "admin.usage.removebalance", false);
-        if (target == null || amount == null) {
+        if (amount == null) {
             return;
         }
         reply(sender, bankService.removeBalance(target, amount));
     }
 
     private void handleAdminSetLevel(CommandSender sender, String[] args) {
-        OfflinePlayer target = target(sender, args, 2);
+        OfflinePlayer target = target(sender, args, 2, () -> handleAdminSetLevel(sender, args));
         if (target == null) {
             return;
         }
@@ -299,7 +318,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     }
 
     private void handleAdminReset(CommandSender sender, String[] args) {
-        OfflinePlayer target = target(sender, args, 2);
+        OfflinePlayer target = target(sender, args, 2, () -> handleAdminReset(sender, args));
         if (target == null) {
             return;
         }
@@ -307,7 +326,7 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
     }
 
     private void handleAdminTransactions(CommandSender sender, String[] args) {
-        OfflinePlayer target = target(sender, args, 2);
+        OfflinePlayer target = target(sender, args, 2, () -> handleAdminTransactions(sender, args));
         if (target == null) {
             return;
         }
@@ -385,12 +404,16 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         result.thenAccept(outcome -> messages.sendResult(sender, outcome));
     }
 
-    private OfflinePlayer target(CommandSender sender, String[] args, int index) {
+    private OfflinePlayer target(CommandSender sender, String[] args, int index, Runnable retry) {
         if (args.length <= index) {
             messages.send(sender, "admin.missing-player");
             return null;
         }
-        OfflinePlayer player = knownPlayer(args[index]);
+        Lookup lookup = knownPlayer(args[index], retry);
+        if (lookup.pending()) {
+            return null;
+        }
+        OfflinePlayer player = lookup.player();
         // Reject names that have never joined, so a typo cannot silently create a junk "ghost" account.
         if (player == null || (!player.hasPlayedBefore() && !player.isOnline())) {
             messages.send(sender, "admin.unknown-player", "player", args[index]);
@@ -399,11 +422,35 @@ public final class BankCommand implements CommandExecutor, TabCompleter {
         return player;
     }
 
-    // Online or in this server's user cache only: getOfflinePlayer(String) blocks the main thread on a
-    // Mojang lookup for an unknown name, and players can type any name they like.
-    private static OfflinePlayer knownPlayer(String name) {
+    // getOfflinePlayer(String) blocks on a Mojang lookup for a name missing from the user cache, and
+    // players can type any name. Online and cached names resolve at once; anything else is looked up off
+    // the main thread and the command runs again with the result (pending until then).
+    private Lookup knownPlayer(String name, Runnable retry) {
         Player online = Bukkit.getPlayerExact(name);
-        return online != null ? online : Bukkit.getOfflinePlayerIfCached(name);
+        if (online != null) {
+            return new Lookup(online, false);
+        }
+        OfflinePlayer cached = Bukkit.getOfflinePlayerIfCached(name);
+        if (cached != null) {
+            return new Lookup(cached, false);
+        }
+        String key = name.toLowerCase(Locale.ROOT);
+        OfflinePlayer looked = lookedUp.remove(key);
+        if (looked != null) {
+            return new Lookup(looked, false);
+        }
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            OfflinePlayer found = Bukkit.getOfflinePlayer(name);
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                lookedUp.put(key, found);
+                retry.run();
+                lookedUp.remove(key);
+            });
+        });
+        return new Lookup(null, true);
+    }
+
+    private record Lookup(OfflinePlayer player, boolean pending) {
     }
 
     private Double parseAmount(Player player, String[] args, String usageKey) {
