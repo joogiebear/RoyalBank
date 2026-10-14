@@ -5,7 +5,7 @@
 
     <groupId>com.mystipixel</groupId>
     <artifactId>royalbank</artifactId>
-    <version>2026.41.4</version>
+    <version>2026.42.0</version>
     <packaging>jar</packaging>
 
     <name>RoyalBank</name>

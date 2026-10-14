@@ -1,3 +1,12 @@
+## 2026.42.0 - 2026-10-13
+
+### Features
+- refresh cached bank balances changed by another server (`9c15582`)
+
+### Fixes
+- update royal-common so a failed balance refresh is retried (`2e38cee`)
+- run bank database work off the main thread (`94fe70a`)
+
 ## 2026.41.4 - 2026-10-11
 
 ### Fixes
