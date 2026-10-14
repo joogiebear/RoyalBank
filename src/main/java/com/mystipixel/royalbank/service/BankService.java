@@ -70,6 +70,7 @@ public final class BankService implements Listener, RoyalBankAPI {
     private static final long LOGIN_LOAD_TIMEOUT_SECONDS = 10L;
     // a login that never turned into a join (kicked, banned) leaves its preloaded row this long at most
     private static final long PRELOAD_KEEP_NANOS = TimeUnit.MINUTES.toNanos(1);
+    private static final int PRUNE_BATCH = 200;
 
     private final JavaPlugin plugin;
     private final BankDatabase database;
@@ -1114,9 +1115,20 @@ public final class BankService implements Listener, RoyalBankAPI {
         return onDb("read transactions of " + account, () -> database.getRecentTransactions(account, limit));
     }
 
-    // queued behind bank actions, so on SQLite's single connection they wait instead of freezing the server
+    // queued behind bank actions, so on SQLite's single connection they wait instead of freezing the server;
+    // one batch of accounts per task, so logins and bank actions get the database thread between batches
     public CompletableFuture<Integer> pruneTransactions(int maxPerPlayer) {
-        return onDb("prune bank transactions", () -> database.pruneTransactions(maxPerPlayer));
+        return onDb("prune bank transactions", () -> database.accountsOverTransactionLimit(maxPerPlayer))
+                .thenCompose(accounts -> pruneBatches(accounts, 0, maxPerPlayer, 0));
+    }
+
+    private CompletableFuture<Integer> pruneBatches(List<String> accounts, int from, int maxPerPlayer, int removed) {
+        if (from >= accounts.size()) {
+            return done(removed);
+        }
+        List<String> batch = accounts.subList(from, Math.min(accounts.size(), from + PRUNE_BATCH));
+        return onDb("prune bank transactions", () -> database.pruneTransactions(batch, maxPerPlayer))
+                .thenCompose(count -> pruneBatches(accounts, from + PRUNE_BATCH, maxPerPlayer, removed + count));
     }
 
     public CompletableFuture<Boolean> backup(Path target) {

@@ -696,30 +696,62 @@ public final class BankDatabase {
         return transactions;
     }
 
-    // the window function needs SQLite 3.25+ or MySQL 8+
-    public int pruneTransactions(int maxPerPlayer) {
+    /** Accounts with more than maxPerPlayer ledger rows. */
+    public List<String> accountsOverTransactionLimit(int maxPerPlayer) {
+        List<String> accounts = new ArrayList<>();
         if (maxPerPlayer <= 0) {
-            return 0;
+            return accounts;
         }
-        String sql = """
-                DELETE FROM bank_transactions
-                WHERE id NOT IN (
-                    SELECT id FROM (
-                        SELECT id,
-                               ROW_NUMBER() OVER (PARTITION BY uuid ORDER BY created_at DESC, id DESC) AS rn
-                        FROM bank_transactions
-                    ) ranked
-                    WHERE ranked.rn <= ?
-                )
-                """;
+        String sql = "SELECT uuid FROM bank_transactions GROUP BY uuid HAVING COUNT(*) > ?";
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setInt(1, maxPerPlayer);
-            return statement.executeUpdate();
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    accounts.add(resultSet.getString(1));
+                }
+            }
         } catch (SQLException exception) {
-            plugin.getLogger().warning("Could not prune bank transactions: " + exception.getMessage());
+            plugin.getLogger().warning("Could not find bank transactions to prune: " + exception.getMessage());
+        }
+        return accounts;
+    }
+
+    // keeps each account's newest maxPerPlayer rows; one short delete per account instead of one over the whole table
+    public int pruneTransactions(List<String> accounts, int maxPerPlayer) {
+        if (maxPerPlayer <= 0 || accounts.isEmpty()) {
             return 0;
         }
+        String cutoffSql = "SELECT created_at, id FROM bank_transactions WHERE uuid = ?"
+                + " ORDER BY created_at DESC, id DESC LIMIT 1 OFFSET ?";
+        String deleteSql = "DELETE FROM bank_transactions WHERE uuid = ?"
+                + " AND (created_at < ? OR (created_at = ? AND id <= ?))";
+        int removed = 0;
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement cutoff = connection.prepareStatement(cutoffSql);
+             PreparedStatement delete = connection.prepareStatement(deleteSql)) {
+            for (String account : accounts) {
+                cutoff.setString(1, account);
+                cutoff.setInt(2, maxPerPlayer);
+                long createdAt;
+                long id;
+                try (ResultSet resultSet = cutoff.executeQuery()) {
+                    if (!resultSet.next()) {
+                        continue;
+                    }
+                    createdAt = resultSet.getLong(1);
+                    id = resultSet.getLong(2);
+                }
+                delete.setString(1, account);
+                delete.setLong(2, createdAt);
+                delete.setLong(3, createdAt);
+                delete.setLong(4, id);
+                removed += delete.executeUpdate();
+            }
+        } catch (SQLException exception) {
+            plugin.getLogger().warning("Could not prune bank transactions: " + exception.getMessage());
+        }
+        return removed;
     }
 
     /** {@code null} on MySQL. */
