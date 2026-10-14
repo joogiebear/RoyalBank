@@ -19,6 +19,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
@@ -48,9 +49,11 @@ public final class BankDatabase {
 
     private static final String INSERT_TRANSACTION_SQL =
             "INSERT INTO bank_transactions (uuid, type, amount, balance_after, created_at, note) VALUES (?, ?, ?, ?, ?, ?)";
-    private static final String SELECT_ACCOUNT_SQL =
+    private static final String SELECT_ACCOUNT_COLUMNS =
             "SELECT uuid, username, balance, level, last_interest_claim, bonus_claimed,"
-                    + " COALESCE(min_balance_since_claim, balance) AS min_balance, version FROM player_banks WHERE uuid = ?";
+                    + " COALESCE(min_balance_since_claim, balance) AS min_balance, version FROM player_banks";
+    private static final String SELECT_ACCOUNT_SQL = SELECT_ACCOUNT_COLUMNS + " WHERE uuid = ?";
+    private static final int ACCOUNTS_PER_QUERY = 500;
     private static final String UPDATE_ACCOUNT_SQL =
             "UPDATE player_banks SET username = ?, balance = ?, level = ?, last_interest_claim = ?, bonus_claimed = ?,"
                     + " min_balance_since_claim = ?, version = version + 1 WHERE uuid = ?";
@@ -379,13 +382,19 @@ public final class BankDatabase {
     /** The stored rows of these accounts in one connection; ids without a row are left out. */
     public List<BankAccount> getAccounts(Collection<UUID> ids) throws SQLException {
         List<BankAccount> accounts = new ArrayList<>(ids.size());
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement(SELECT_ACCOUNT_SQL)) {
-            for (UUID id : ids) {
-                statement.setString(1, id.toString());
-                try (ResultSet resultSet = statement.executeQuery()) {
-                    if (resultSet.next()) {
-                        accounts.add(readAccount(resultSet));
+        List<UUID> idList = new ArrayList<>(ids);
+        try (Connection connection = dataSource.getConnection()) {
+            for (int from = 0; from < idList.size(); from += ACCOUNTS_PER_QUERY) {
+                List<UUID> chunk = idList.subList(from, Math.min(idList.size(), from + ACCOUNTS_PER_QUERY));
+                String sql = SELECT_ACCOUNT_COLUMNS + " WHERE uuid IN (" + String.join(", ", Collections.nCopies(chunk.size(), "?")) + ")";
+                try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                    for (int i = 0; i < chunk.size(); i++) {
+                        statement.setString(i + 1, chunk.get(i).toString());
+                    }
+                    try (ResultSet resultSet = statement.executeQuery()) {
+                        while (resultSet.next()) {
+                            accounts.add(readAccount(resultSet));
+                        }
                     }
                 }
             }
