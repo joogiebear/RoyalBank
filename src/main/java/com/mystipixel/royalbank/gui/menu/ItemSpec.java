@@ -114,7 +114,8 @@ public final class ItemSpec {
                 profile.setProperty(new com.destroystokyo.paper.profile.ProfileProperty("textures", texture));
                 skull.setPlayerProfile(profile);
             } else if (head != null && !head.isBlank()) {
-                skull.setOwningPlayer(Bukkit.getOfflinePlayer(apply(head, placeholders)));
+                // a name-only profile: the skin is filled in later, never by a Mojang lookup on the main thread
+                skull.setPlayerProfile(Bukkit.createProfile(apply(head, placeholders)));
             }
         } catch (Throwable ignored) {
             // a malformed texture must never break the menu
