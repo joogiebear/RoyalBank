@@ -605,15 +605,35 @@ public final class BankService implements Listener, RoyalBankAPI {
 
     @Override
     public double getAccountBalance(UUID accountId) {
-        return round(onDbBlocking("read shared account " + accountId, () -> database.getAccount(accountId)).join()
-                .map(BankAccount::balance).orElse(0.0));
+        return accountBalance(accountId, true).join();
+    }
+
+    @Override
+    public CompletableFuture<Double> getAccountBalanceAsync(UUID accountId) {
+        return accountBalance(accountId, false);
+    }
+
+    private CompletableFuture<Double> accountBalance(UUID accountId, boolean blocking) {
+        return onDb(blocking, "read shared account " + accountId, () -> database.getAccount(accountId))
+                .thenApply(account -> round(account.map(BankAccount::balance).orElse(0.0)));
     }
 
     @Override
     public AccountView getAccountView(UUID accountId, String label) {
-        BankAccount account = onDbBlocking("read shared account " + accountId, () -> loadAccountById(accountId, label)).join();
-        BankLevel level = getEffectiveLevel(account.level());
-        return new AccountView(round(account.balance()), account.level(), level.name(), level.maxBalance());
+        return accountView(accountId, label, true).join();
+    }
+
+    @Override
+    public CompletableFuture<AccountView> getAccountViewAsync(UUID accountId, String label) {
+        return accountView(accountId, label, false);
+    }
+
+    private CompletableFuture<AccountView> accountView(UUID accountId, String label, boolean blocking) {
+        return onDb(blocking, "read shared account " + accountId, () -> loadAccountById(accountId, label))
+                .thenApply(account -> {
+                    BankLevel level = getEffectiveLevel(account.level());
+                    return new AccountView(round(account.balance()), account.level(), level.name(), level.maxBalance());
+                });
     }
 
     @Override
@@ -642,7 +662,20 @@ public final class BankService implements Listener, RoyalBankAPI {
 
     @Override
     public UpgradeView getUpgradeView(UUID accountId, String label) {
-        BankAccount account = onDbBlocking("read shared account " + accountId, () -> loadAccountById(accountId, label)).join();
+        return upgradeView(accountId, label, true).join();
+    }
+
+    @Override
+    public CompletableFuture<UpgradeView> getUpgradeViewAsync(UUID accountId, String label) {
+        return upgradeView(accountId, label, false);
+    }
+
+    private CompletableFuture<UpgradeView> upgradeView(UUID accountId, String label, boolean blocking) {
+        return onDb(blocking, "read shared account " + accountId, () -> loadAccountById(accountId, label))
+                .thenApply(this::upgradeViewOf);
+    }
+
+    private UpgradeView upgradeViewOf(BankAccount account) {
         BankLevel next = levelManager.getNextLevel(account.level()).orElse(null);
         if (next == null) {
             return new UpgradeView(true, account.level(), "", 0.0, "", getEffectiveLevel(account.level()).maxBalance());
@@ -893,12 +926,23 @@ public final class BankService implements Listener, RoyalBankAPI {
 
     @Override
     public List<TransactionView> getAccountTransactions(UUID accountId, int limit) {
-        List<TransactionView> out = new ArrayList<>();
-        for (BankTransaction t : onDbBlocking("read shared account transactions " + accountId,
-                () -> database.getRecentTransactions(accountId, limit)).join()) {
-            out.add(new TransactionView(t.type(), t.amount(), t.balanceAfter(), t.createdAt(), t.note()));
-        }
-        return out;
+        return accountTransactions(accountId, limit, true).join();
+    }
+
+    @Override
+    public CompletableFuture<List<TransactionView>> getAccountTransactionsAsync(UUID accountId, int limit) {
+        return accountTransactions(accountId, limit, false);
+    }
+
+    private CompletableFuture<List<TransactionView>> accountTransactions(UUID accountId, int limit, boolean blocking) {
+        return onDb(blocking, "read shared account transactions " + accountId,
+                () -> database.getRecentTransactions(accountId, limit)).thenApply(rows -> {
+                    List<TransactionView> out = new ArrayList<>(rows.size());
+                    for (BankTransaction t : rows) {
+                        out.add(new TransactionView(t.type(), t.amount(), t.balanceAfter(), t.createdAt(), t.note()));
+                    }
+                    return out;
+                });
     }
 
     public CompletableFuture<OperationResult> upgrade(Player player) {

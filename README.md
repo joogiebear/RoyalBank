@@ -229,7 +229,7 @@ auction sale before it ever reaches the bank.
 - The database uses WAL mode with a busy timeout. Transaction pruning and backups run on the same
   database thread, so on SQLite they queue with bank actions instead of holding up the server.
 - `RoyalBankAPI` methods that return a value wait for the database thread. The shared-account actions
-  also have `accountDepositAsync`, `accountWithdrawAsync` and `accountUpgradeAsync`, which do not.
+  and reads also have `Async` variants (`accountDepositAsync`, `getAccountViewAsync` and so on), which do not.
 - Existing databases are migrated automatically on startup (a `bonus_claimed` column is added).
 
 ## Production notes
