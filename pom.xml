@@ -76,7 +76,7 @@
         <dependency>
             <groupId>com.github.joogiebear</groupId>
             <artifactId>royal-common</artifactId>
-            <version>2026.41.1</version>
+            <version>2026.42.0</version>
         </dependency>
         <!-- bStats is still shaded (relocated) into the jar; it is not a library-loader artifact. -->
         <dependency>
